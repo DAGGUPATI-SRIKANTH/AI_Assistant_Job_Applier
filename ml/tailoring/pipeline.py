@@ -24,6 +24,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 from backend.config.loader import PROJECT_ROOT
+from backend.core.processes import probe
 
 RUNS = PROJECT_ROOT / "data" / "tailoring" / "runs"
 # The longest the finished resume waits for its skim test (advice, never a blocker).
@@ -309,7 +310,7 @@ def interrupted(folder: Path, state: dict) -> bool:
     pid = state.get("pid")
     if pid:
         try:
-            os.kill(int(pid), 0)
+            probe(int(pid))
             return False
         except ProcessLookupError:
             return True

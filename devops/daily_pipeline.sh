@@ -13,8 +13,10 @@
 
 set -uo pipefail
 
-# PIPELINE_PROJECT exists for the tests (qa/tests/test_daily_pipeline_sh.py); launchd never sets it.
-PROJECT="${PIPELINE_PROJECT:-/Volumes/Storage/D Drive /Rep/AI_Assistant_Job_Applier}"
+# The project is the folder this script sits in, wherever the app was installed (pwd -P: the
+# real path, the one the web app matches to find this run). PIPELINE_PROJECT exists for the
+# tests (qa/tests/test_daily_pipeline_sh.py); launchd never sets it.
+PROJECT="${PIPELINE_PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 PY="$PROJECT/.venv/bin/python"
 
 # Hold the Mac awake for the length of the run.
@@ -53,6 +55,17 @@ if [ "$TASK" = "daily" ] && [ "${MANUAL:-0}" != "1" ] && [ -f "$PROJECT/data/dai
   log "daily: the 6 AM start is switched off on the Jobs page — not starting"
   echo '{"ok":true,"skipped":"switched off"}'
   exit 0
+fi
+
+# Nothing to look for before there is a resume and a search made from it: a new install's first
+# 6 AM, or Start pressed before the Welcome page's first step (backend/core/setup_state.py).
+if [ "$TASK" = "daily" ]; then
+  NOT_READY="$("$PY" -m backend.core.setup_state why 2>/dev/null)"
+  if [ -n "$NOT_READY" ]; then
+    log "daily: not starting — $NOT_READY"
+    echo '{"ok":true,"skipped":"not set up"}'
+    exit 0
+  fi
 fi
 
 # mkdir is the atomic primitive here: macOS has no flock, and a lock FILE can
@@ -182,9 +195,10 @@ try:
 except Exception:
     raise SystemExit(0)
 if s.get("task") == "health":
+    from backend.config.loader import web_url
     n = len(s.get("problems") or [])
     print((f"Weekly health: {n} thing(s) to look at" if n else "Weekly health: all good")
-          + " — http://localhost:8770/health|" + ("Basso" if n else ""))
+          + f" — {web_url('/health')}|" + ("Basso" if n else ""))
 elif not s.get("ok"):
     print(f"{s.get('task', 'run')} failed (exit {s.get('exit')}) — see data/daily_run.log|Basso")
 elif s.get("new_strong"):

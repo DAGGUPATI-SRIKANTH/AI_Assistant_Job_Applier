@@ -32,7 +32,7 @@ from pathlib import Path
 from backend.apply import greenhouse
 from backend.apply.profile import Applicant, ProfileIncomplete, check_ready, load
 from backend.apply.queue import build_queue, summarise
-from backend.config.loader import PROJECT_ROOT
+from backend.config.loader import PROJECT_ROOT, web_url
 from data_engineering.db.models import Job
 from data_engineering.db.session import get_session
 
@@ -362,12 +362,12 @@ def run(cfg, *, limit: int = 10, job_id: int | None = None, tailor: bool = True,
     try:
         applicant = load(PROJECT_ROOT / "backend" / "config" / "applicant.yaml")
     except ProfileIncomplete as exc:
-        raise NotReady(f"{exc}\nFill in your details at http://127.0.0.1:8770/applicant")
+        raise NotReady(f"{exc}\nFill in your details at {web_url('/applicant', cfg)}")
     problems = check_ready(applicant)
     if problems:
         raise NotReady("Your applicant details are incomplete:\n"
                        + "\n".join(f"  - {p}" for p in problems)
-                       + "\nFix them at http://127.0.0.1:8770/applicant")
+                       + f"\nFix them at {web_url('/applicant', cfg)}")
 
     ready = {}
     if prepared:

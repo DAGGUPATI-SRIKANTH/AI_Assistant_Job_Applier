@@ -22,6 +22,7 @@ from datetime import datetime
 
 from flask import jsonify, request
 
+from backend.api import app as webapp
 from backend.api.app import DAILY_LOG, PROJECT_ROOT, app, task_pid
 
 SCRIPT = PROJECT_ROOT / "devops" / "daily_pipeline.sh"
@@ -34,12 +35,7 @@ PAGE_TASKS = ("scrape", "score")                            # page-started work 
 
 def pipeline_pids() -> list[int]:
     """The morning run's own process: the script, however it was started."""
-    try:
-        out = subprocess.run(["pgrep", "-f", "daily_pipeline.sh daily"], capture_output=True,
-                             text=True, timeout=5).stdout
-    except (OSError, subprocess.SubprocessError):
-        return []
-    return [int(p) for p in out.split() if p.isdigit()]
+    return webapp.pipeline_pids("daily") or []
 
 
 def _say(line: str) -> None:
@@ -74,11 +70,20 @@ def last_run() -> dict | None:
     return run
 
 
+def not_ready() -> str | None:
+    """Why a morning run should wait for the person: no resume yet, or no search made from it
+    (backend/core/setup_state.py). A new install's first morning is the person's own first step."""
+    from backend.core.setup_state import why_not_ready
+    return why_not_ready(webapp.cfg())
+
+
 def missed_morning(now: datetime | None = None) -> bool:
     """Today's 6 AM start never happened. launchd runs a start missed while the Mac slept as soon
     as it wakes, but not one missed while it was off: then nothing runs until this notices."""
     now = now or datetime.now()
     if (now.hour, now.minute) < (6, 5) or AUTO_OFF.exists() or LOCK.is_dir() or pipeline_pids():
+        return False
+    if not_ready():
         return False
     last = last_run()
     return not (last and str(last.get("started") or "").startswith(now.strftime("%Y-%m-%d")))
@@ -131,6 +136,9 @@ def morning_start():
     if busy:
         return jsonify(ok=False, error=f"A {'fetch' if busy == 'scrape' else 're-score'} you started from "
                                        "this page is running. Stop it, or let it finish, first."), 409
+    waiting = not_ready()
+    if waiting:
+        return jsonify(ok=False, error=f"Not yet: {waiting}."), 409
     _clear_lock()                          # left by a run that was killed; nothing holds it
     OUT.parent.mkdir(parents=True, exist_ok=True)
     with OUT.open("a") as out:

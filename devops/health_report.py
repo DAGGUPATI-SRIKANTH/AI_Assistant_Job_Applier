@@ -26,7 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 REPORTS = ROOT / "data" / "reports"
 sys.path.insert(0, str(ROOT))
-from devops.backup_db import DEST as BACKUPS  # noqa: E402
+from devops.backup_db import destination as backup_folder  # noqa: E402
 
 FAIL_RATE_WARN = 0.05      # more than 5% of board scrapes failing in a day
 BACKUP_MAX_HOURS = 36
@@ -121,7 +121,8 @@ def morning_runs(root: Path, since: date) -> dict[str, dict | None]:
     return days
 
 
-def collect(root: Path = ROOT, days: int = 7, backups: Path = BACKUPS) -> dict:
+def collect(root: Path = ROOT, days: int = 7, backups: Path | None = None) -> dict:
+    backups = backups or backup_folder(root)
     since = date.today() - timedelta(days=days - 1)
     s = since.isoformat()
     with _db(root) as db:

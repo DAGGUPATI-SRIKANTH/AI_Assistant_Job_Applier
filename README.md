@@ -50,6 +50,11 @@ chat subscription should have to buy API credit to use this.
 
 ## 1. Quick start
 
+**On a Mac, without Terminal:** download `Job-Applier-mac-<version>.zip` from the Releases
+page and double-click **Job Applier**: it installs itself and opens a Welcome page. See
+[docs/mac-install.md](docs/mac-install.md). The rest of this section is for running it from a
+clone.
+
 **Once it is set up, this is the whole daily routine:**
 
 ```bash

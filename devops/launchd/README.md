@@ -1,15 +1,17 @@
 # Scheduled runs
 
-These are copies of what is installed in `~/Library/LaunchAgents/`. The copies
-are here so the schedule is in version control; launchd only reads the ones in
-the home directory.
+These are copies of what is installed in `~/Library/LaunchAgents/` for this
+clone. The copies are here so the schedule is in version control; launchd only
+reads the ones in the home directory. A copy installed by the Mac app gets its
+own two agents (`com.jobapplier.webapp`, `com.jobapplier.daily`), written by
+`devops/mac/install.py` for its own folder.
 
 | agent | when | what |
 |---|---|---|
 | `…AI_Assistant_Job_Applier.daily` | 06:00 daily | scrape → score → export → digest |
 | `…AI_Assistant_Job_Applier.enrich` | 02:23 and 14:23 | continue website/careers enrichment |
 | `…AI_Assistant_Job_Applier.discover` | Sunday 03:07 | probe for new boards |
-| `…AI_Assistant_Job_Applier.backup` | 02:40 daily | jobs.db + your settings → `/Volumes/Storage/AI Job Applier backups/<date>/`, last 14 kept |
+| `…AI_Assistant_Job_Applier.backup` | 02:40 daily | jobs.db + your settings → `BACKUP_DIR` from `.env` (else `~/Documents/Job Applier backups`)`/<date>/`, last 14 kept |
 | `…AI_Assistant_Job_Applier.health` | Sunday 09:30 | weekly health report → `data/reports/`, shown at `/health` |
 
 All of them call `devops/daily_pipeline.sh <task>`, which takes a lock so two runs

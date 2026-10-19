@@ -50,6 +50,19 @@ def test_switched_off_the_6am_tick_does_nothing(project):
     assert not (root / "data" / "daily.lock").exists()
 
 
+@pytest.mark.parametrize("manual", ["0", "1"])
+def test_no_run_before_there_is_a_resume_to_search_with(project, manual):
+    """A new install's first 6 AM, or Start pressed before the first upload: nothing to look for."""
+    root, run = project
+    python = root / ".venv" / "bin" / "python"
+    python.write_text(python.read_text().replace(
+        "exit 0", 'if [ "$*" = "-m backend.core.setup_state why" ]; then echo "there is no resume yet"; fi\nexit 0'))
+    done, log, calls = run(MANUAL=manual)
+    assert done.returncode == 0 and '"skipped":"not set up"' in done.stdout
+    assert "not starting — there is no resume yet" in log
+    assert "main.py daily" not in calls and not (root / "data" / "daily.lock").exists()
+
+
 def test_start_from_the_page_runs_whatever_the_switch_says(project):
     root, run = project
     (root / "data" / "daily_auto_off").write_text("off")
@@ -86,7 +99,7 @@ def test_a_live_run_keeps_its_lock_and_a_dead_ones_lock_is_cleared(project):
     try:
         pidfile.write_text(str(live.pid))
         done, log, calls = run(MANUAL="1")
-        assert '"skipped":"already running"' in done.stdout and calls == ""
+        assert '"skipped":"already running"' in done.stdout and "main.py" not in calls
     finally:
         live.kill()
         live.wait()

@@ -129,7 +129,8 @@ def run_daily(cfg, skip_scrape: bool = False, since_hours: int = 24, cloud: bool
 
     # -- 1a. the GitHub run's postings, on a scheduled morning ----------------
     from_cloud = None
-    if cloud and not skip_scrape:
+    from devops.cloud_results import set_up as cloud_set_up
+    if cloud and not skip_scrape and cloud_set_up():
         def _cloud():
             from devops.cloud_results import bring_in
             return bring_in(say=lambda line: print(f"{datetime.now():%H:%M:%S}  {line}", flush=True))

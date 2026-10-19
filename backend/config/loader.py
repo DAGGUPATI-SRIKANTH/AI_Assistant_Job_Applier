@@ -50,6 +50,27 @@ class Config:
 
 _MISSING = object()
 
+DEFAULT_PORT = 8770
+
+
+def web_port(cfg: Config | None = None) -> int:
+    """The port the web app answers on. JOB_APPLIER_PORT (the environment, then .env) is set by
+    the Mac installer when 8770 was taken on that Mac; then webapp.port in config.yaml; then 8770.
+    .env is read, not loaded: loading it here would put every key in it into the environment of
+    whatever asked for a link."""
+    from backend.config.envfile import read_env
+    value = (os.getenv("JOB_APPLIER_PORT") or read_env(PROJECT_ROOT / ".env").get("JOB_APPLIER_PORT")
+             or (cfg.get("webapp.port") if cfg is not None else None) or DEFAULT_PORT)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_PORT
+
+
+def web_url(path: str = "", cfg: Config | None = None) -> str:
+    """A link to one of the web app's pages on this Mac, for messages printed outside it."""
+    return f"http://localhost:{web_port(cfg)}{path}"
+
 
 def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> Config:
     load_dotenv(PROJECT_ROOT / ".env")

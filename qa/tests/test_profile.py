@@ -252,6 +252,24 @@ def test_a_non_us_resume_excludes_nothing():
     assert profile_of(resume).exclude_locations == []
 
 
+@pytest.mark.parametrize("contact", ["Chicago, IL", "St. Louis, MO 63101", "Austin TX 78701",
+                                     "Winston-Salem, NC", "Washington, DC"])
+def test_a_us_contact_line_without_the_country_is_us(contact):
+    """Most US resumes say "Chicago, IL" and never "USA". Those read as nowhere, and a nurse in
+    Chicago was searched for remote jobs only -- almost no nursing job is remote."""
+    profile = profile_of(NURSE_RESUME.replace("Austin, TX, USA", contact))
+    assert profile.locations == []                                   # anywhere in the US
+    assert "india" in profile.exclude_locations and "london" in profile.exclude_locations
+
+
+@pytest.mark.parametrize("contact", ["Berlin", "Hyderabad, IN", "maria.only@example.com"])
+def test_a_place_that_is_not_the_us_or_none_keeps_every_location(contact):
+    """Undeterminable kept only "remote", whatever its comment said: every onsite job dropped.
+    "Hyderabad, IN" is India, not Indiana."""
+    profile = profile_of(NURSE_RESUME.replace("Austin, TX, USA", contact))
+    assert profile.locations == [] and profile.exclude_locations == []
+
+
 def test_a_bare_city_and_state_is_not_dropped():
     """The bug this fixed, stated as the behaviour that matters.
 

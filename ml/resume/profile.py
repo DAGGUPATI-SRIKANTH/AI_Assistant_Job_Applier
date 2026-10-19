@@ -631,6 +631,14 @@ NON_US_PLACES = [
     "bogota", "lagos", "nairobi", "cairo", "dubai",
 ]
 
+_US_STATES = ("AL|AK|AZ|AR|CA|CO|CT|DE|DC|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|"
+              "NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY")
+# "Chicago, IL", "St. Louis, MO", "Winston-Salem, NC": a place of up to four words, a comma, a
+# state in capitals. The place is kept (group 1) to rule out "Hyderabad, IN", which is India.
+_US_CITY_STATE = re.compile(rf"\b([A-Z][A-Za-z.'-]*(?: [A-Z][A-Za-z.'-]*){{0,3}}), ?(?:{_US_STATES})\b")
+# "IL 60601" or "TX 78701-1234": a state and its ZIP code.
+_US_STATE_ZIP = re.compile(rf"\b(?:{_US_STATES}) \d{{5}}(?:-\d{{4}})?\b")
+
 
 def extract_locations(resume: Resume) -> tuple[list[str], list[str]]:
     """Where this person can work, from the contact line.
@@ -640,9 +648,9 @@ def extract_locations(resume: Resume) -> tuple[list[str], list[str]]:
     match the include term "remote".
     """
     header = resume.section("HEADER")
-    text = (header.text() if header else resume.text()[:400]).lower()
+    raw = header.text() if header else resume.text()[:400]
+    text = raw.lower()
 
-    include: list[str] = ["remote"]
     us_based = bool(
         re.search(r"\b(usa|united states|u\.s\.)\b", text)
         or re.search(
@@ -650,6 +658,12 @@ def extract_locations(resume: Resume) -> tuple[list[str], list[str]]:
             r"mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy)\b,?\s*usa?\b",
             text,
         )
+        # Most US contact lines name no country: "Chicago, IL", or a ZIP after the state. Those
+        # read as nowhere until 19 Oct 2026, and a nurse in Chicago was searched for remote jobs
+        # only. Case-sensitive on purpose: a state is written in capitals there, and ", in" or
+        # ", or" in a sentence is not one.
+        or any(m.group(1).lower() not in NON_US_PLACES for m in _US_CITY_STATE.finditer(raw[:2000]))
+        or _US_STATE_ZIP.search(raw[:2000])
     )
     if us_based:
         # An EMPTY include list, deliberately — it means "anywhere not excluded",
@@ -676,8 +690,9 @@ def extract_locations(resume: Resume) -> tuple[list[str], list[str]]:
 
     # Somewhere else, or undeterminable. Excluding every non-US place would be
     # wrong, and inferring a country from a phone number is worse. Keep every
-    # location and let the person narrow it in the profile file.
-    return _dedupe(include), []
+    # location and let the person narrow it on the Welcome page. (This returned
+    # ["remote"] -- every onsite job dropped -- whatever the comment said.)
+    return [], []
 
 
 def derive_search_profile(resume: Resume, now: datetime | None = None) -> SearchProfile:

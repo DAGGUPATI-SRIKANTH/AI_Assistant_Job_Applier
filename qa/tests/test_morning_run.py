@@ -82,6 +82,31 @@ def test_a_lock_nobody_holds_does_not_keep_the_page_at_running(tmp_path, monkeyp
     assert webapp._scheduled_run_holding("scrape") == "daily"
 
 
+def test_only_this_copys_script_is_the_run(tmp_path, monkeypatch):
+    """19 Oct: a shell loop waiting for the run to end -- its command line held "daily_pipeline.sh
+    daily" -- was taken for the run, and Stop ended it with the run. Neither that nor another copy
+    of the app on the same Mac is this copy's morning run."""
+    here, other = tmp_path / "Job Applier" / "devops", tmp_path / "other copy" / "devops"
+    for folder in (here, other):
+        folder.mkdir(parents=True)
+        (folder / "daily_pipeline.sh").write_text("sleep 30\n")
+    script = here / "daily_pipeline.sh"
+    monkeypatch.setattr(webapp, "PIPELINE_SCRIPT", script)
+    procs = [subprocess.Popen(["/bin/bash", str(script), "daily"]),                     # the run
+             subprocess.Popen(["/bin/bash", str(other / "daily_pipeline.sh"), "daily"]),  # another copy
+             subprocess.Popen(["/bin/sh", "-c", f'sleep 30; : "{script} daily"']),      # mentions it
+             subprocess.Popen(["/bin/bash", str(script), "discover"])]                  # another task
+    try:
+        assert webapp.pipeline_pids("daily") == [procs[0].pid]
+        assert webapp.pipeline_pids("discover") == [procs[3].pid]
+        assert webapp._pipeline_alive("daily") is True
+    finally:
+        for p in procs:
+            p.kill()
+            p.wait()
+    assert webapp.pipeline_pids("daily") == [] and webapp._pipeline_alive("daily") is False
+
+
 @pytest.fixture
 def controls(tmp_path, monkeypatch):
     data = tmp_path / "data"
@@ -92,7 +117,22 @@ def controls(tmp_path, monkeypatch):
         monkeypatch.setattr(morning_pages, name, path)
     monkeypatch.setattr(morning_pages, "task_pid", lambda task: None)
     monkeypatch.setattr(morning_pages, "pipeline_pids", lambda: [])
+    monkeypatch.setattr(morning_pages, "not_ready", lambda: None)
     return data, webapp.app.test_client()
+
+
+def test_nothing_runs_before_there_is_a_resume_to_search_with(controls, monkeypatch):
+    """A new Mac opened after 6 AM caught up "today's" morning a minute after the app first
+    started -- reading every board against config.yaml's example search, before the person had
+    uploaded anything. Neither the catch-up nor Start runs until there is a resume and a search."""
+    data, client = controls
+    monkeypatch.setattr(morning_pages, "not_ready", lambda: "there is no resume yet — upload one")
+    started = []
+    monkeypatch.setattr(morning_pages.subprocess, "Popen", lambda *a, **k: started.append(a))
+    assert not morning_pages.missed_morning(NOW.replace(hour=9, minute=0))
+    assert not morning_pages.catch_up()
+    reply = client.post("/run/morning/start")
+    assert reply.status_code == 409 and "no resume yet" in reply.get_json()["error"] and started == []
 
 
 def test_start_runs_the_script_by_hand_even_with_the_6am_start_off(controls, monkeypatch):

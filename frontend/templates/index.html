@@ -73,6 +73,15 @@
   </div>
 </header>
 
+{% if not resume %}
+<section class="resume none" id="start-here">
+  <span class="lbl">New here?</span>
+  <span class="name">Set up in five steps</span>
+  <span class="sub">Your resume first: the jobs to look for are made from it.</span>
+  <a class="btn primary" style="margin-left:auto" href="{{ url_for('welcome_page') }}">Start here →</a>
+</section>
+{% endif %}
+
 <section class="morning" id="morning" aria-labelledby="morning-title">
   <div class="m-text">
     <h2 id="morning-title">Morning run</h2>

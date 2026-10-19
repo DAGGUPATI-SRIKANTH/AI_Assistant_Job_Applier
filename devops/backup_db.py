@@ -6,12 +6,14 @@ with SQLite's online backup API (safe while the web app and a scrape hold it
 open; a plain file copy of a WAL database can be torn), checked, compressed,
 and kept for KEEP nights.
 
-The person's own files (applicant.yaml, answers.yaml, additions.yaml) go in the
-same night's folder: they are git-ignored, so the repository is no backup for
-them. companies.db changes rarely and is only copied when it has changed.
+The person's own files (applicant.yaml, the answers, the search profile, the
+lines added to the resume) go in the same night's folder: they are git-ignored,
+so the repository is no backup for them. companies.db changes rarely and is
+only copied when it has changed.
 
     python devops/backup_db.py [--to DIR] [--keep N]
 
+The folder is BACKUP_DIR in .env, or "Job Applier backups" in Documents.
 Prints one line of JSON for daily_pipeline.sh; exits non-zero on failure.
 """
 
@@ -20,6 +22,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -28,9 +31,22 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEST = Path("/Volumes/Storage/AI Job Applier backups")
 KEEP = 14
-PERSONAL = ("backend/config/applicant.yaml", "backend/config/answers.yaml", "backend/config/additions.yaml")
+# additions.yaml was listed under backend/config/, where it never was: the lines added to the
+# resume, the general answers and the search profile went unsaved until 19 Oct 2026.
+PERSONAL = ("backend/config/applicant.yaml", "backend/config/answers.yaml",
+            "backend/config/general_answers.yaml", "backend/config/search_profile.yaml",
+            "ml/resume/additions.yaml")
+
+
+def destination(root: Path = ROOT) -> Path:
+    """Where the nightly copies go: BACKUP_DIR (the environment, then .env), else a folder in
+    Documents -- every Mac has one, where a second drive is one person's."""
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from backend.config.envfile import read_env
+    chosen = (os.environ.get("BACKUP_DIR") or read_env(root / ".env").get("BACKUP_DIR") or "").strip()
+    return Path(chosen).expanduser() if chosen else Path.home() / "Documents" / "Job Applier backups"
 
 
 def copy_db(source: Path, target: Path) -> None:
@@ -75,7 +91,8 @@ def prune(dest: Path, keep: int) -> list[str]:
     return gone
 
 
-def run(dest: Path = DEST, keep: int = KEEP, root: Path = ROOT) -> dict:
+def run(dest: Path | None = None, keep: int = KEEP, root: Path = ROOT) -> dict:
+    dest = dest or destination(root)
     started = time.time()
     night = dest / datetime.now().strftime("%Y-%m-%d")
     night.mkdir(parents=True, exist_ok=True)
@@ -104,7 +121,7 @@ def run(dest: Path = DEST, keep: int = KEEP, root: Path = ROOT) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--to", type=Path, default=DEST)
+    ap.add_argument("--to", type=Path, default=None)
     ap.add_argument("--keep", type=int, default=KEEP)
     args = ap.parse_args(argv)
     try:

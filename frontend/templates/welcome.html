@@ -1,0 +1,249 @@
+{% extends "base.html" %}
+{% block title %}Welcome{% endblock %}
+{% block body %}
+<header class="top">
+  <div>
+    <h1>Welcome to Job Applier</h1>
+    <div class="sub">Five steps, in order. Only the first one is needed to start finding jobs; come back
+      to the others whenever you like.</div>
+  </div>
+</header>
+
+<section class="card welcome">
+  <ol class="steps">
+
+    <li class="step {% if s.resume %}done{% endif %}" id="w-resume">
+      <span class="tick" data-n="1" aria-hidden="true"></span>
+      <div class="step-body">
+        <div class="step-head">
+          <b>Your resume</b>
+          {% if s.resume %}<span class="step-tag">done</span>{% endif %}
+        </div>
+        <div class="hint">Everything is made from it: the jobs to look for, how well each one matches,
+          and the resume tailored for each application. A .docx, .pdf, .txt or .md file.</div>
+        {% if s.resume %}
+          <div class="hint" style="margin-top:6px">Using <b>{{ s.resume.name }}</b>.</div>
+        {% endif %}
+        <form id="w-upload" class="row" style="margin-top:9px" enctype="multipart/form-data">
+          <input type="file" id="w-file" name="resume" accept=".docx,.pdf,.txt,.md" aria-label="Resume file">
+          <button class="btn primary" type="submit">{{ 'Replace it' if s.resume else 'Upload' }}</button>
+        </form>
+        <div class="out" id="w-upload-out" hidden></div>
+      </div>
+    </li>
+
+    <li class="step {% if s.search.titles %}done{% elif not s.resume %}blocked{% endif %}" id="w-search">
+      <span class="tick" data-n="2" aria-hidden="true"></span>
+      <div class="step-body">
+        <div class="step-head">
+          <b>What to look for</b>
+          {% if s.search.titles %}<span class="step-tag">made from your resume</span>{% endif %}
+        </div>
+        {% if s.search.titles %}
+          <div class="hint">Read as <b>{{ s.search.seniority }}</b>{% if s.search.years %}, {{ s.search.years|round|int }} years{% endif %}
+            {%- if s.search.families %} — {{ s.search.families|join(', ') }}{% endif %}.
+            Job titles: <b>{{ s.search.titles[:6]|join(', ') }}</b>{% if s.search.titles|length > 6 %} and
+            {{ s.search.titles|length - 6 }} more{% endif %}.
+            {% if s.search.locations %}Places: {{ s.search.locations|join(', ') }}.{% endif %}</div>
+          <details class="fold" id="w-edit">
+            <summary>Not quite right? Change it</summary>
+            <form id="w-search-form" class="w-search">
+              <label><span class="sub">Job titles to look for, one per line</span>
+                <textarea id="w-titles" rows="8">{{ s.search.titles|join('\n') }}</textarea></label>
+              <label><span class="sub">Places you can work, one per line (leave empty for anywhere; "remote" counts)</span>
+                <textarea id="w-places" rows="4">{{ s.search.locations|join('\n') }}</textarea></label>
+              <label><span class="sub">Skip a job whose title has any of these words, one per line</span>
+                <textarea id="w-skip" rows="4">{{ s.search.exclude_titles|join('\n') }}</textarea></label>
+              <div class="row"><button class="btn primary" type="submit">Save the search</button>
+                <span class="hint">A new resume upload makes a new search from it.</span></div>
+            </form>
+            <div class="out" id="w-search-out" hidden></div>
+          </details>
+        {% elif s.resume %}
+          <div class="hint warn">No job titles could be read from this resume. Add the titles you want
+            below, one per line.</div>
+          <form id="w-search-form" class="w-search" style="margin-top:8px">
+            <label><span class="sub">Job titles to look for, one per line</span>
+              <textarea id="w-titles" rows="6"></textarea></label>
+            <input type="hidden" id="w-places"><input type="hidden" id="w-skip">
+            <div class="row"><button class="btn primary" type="submit">Save the search</button></div>
+          </form>
+          <div class="out" id="w-search-out" hidden></div>
+        {% else %}
+          <div class="hint">Made from your resume as soon as you upload it. You can change it here.</div>
+        {% endif %}
+      </div>
+    </li>
+
+    <li class="step {% if s.details.ready %}done{% endif %}" id="w-details">
+      <span class="tick" data-n="3" aria-hidden="true"></span>
+      <div class="step-body">
+        <div class="step-head">
+          <b>Your details</b>
+          {% if s.details.ready %}<span class="step-tag">done</span>{% endif %}
+        </div>
+        <div class="hint">Name, email, phone, where you live and whether you can work there: what
+          every application form asks. Needed to apply, not to find jobs.</div>
+        <div class="row" style="margin-top:9px">
+          <a class="btn" href="{{ url_for('applicant_form') }}">{{ 'Change them' if s.details.ready else 'Fill them in' }}</a>
+          {% if s.details.exists and not s.details.ready %}<span class="hint">{{ s.details.missing }} still to fill in</span>{% endif %}
+        </div>
+      </div>
+    </li>
+
+    <li class="step {% if s.writer.chosen %}done{% endif %}" id="w-writer">
+      <span class="tick" data-n="4" aria-hidden="true"></span>
+      <div class="step-body">
+        <div class="step-head">
+          <b>Who writes your tailored resumes</b>
+          {% if s.writer.chosen %}<span class="step-tag">{{ s.writer.label }}</span>{% endif %}
+        </div>
+        <div class="hint">An AI rewrites your resume for each job, using only what is in it. Use the
+          Claude, ChatGPT or Gemini plan you already have (no key, nothing extra to pay), or a key.
+          Finding and scoring jobs works without one.</div>
+        <div class="row" style="margin-top:9px">
+          <a class="btn" href="{{ url_for('setup_form') }}#plans">{{ 'Change' if s.writer.chosen else 'Choose' }}</a>
+        </div>
+      </div>
+    </li>
+
+    <li class="step {% if s.jobs.open %}done{% elif s.morning.waiting %}blocked{% endif %}" id="w-find">
+      <span class="tick" data-n="5" aria-hidden="true"></span>
+      <div class="step-body">
+        <div class="step-head">
+          <b>Find your jobs</b>
+          {% if s.jobs.open %}<span class="step-tag">{{ '{:,}'.format(s.jobs.open) }} found</span>{% endif %}
+        </div>
+        <div class="hint">Reads the job boards of {{ '{:,}'.format(boards) }} employers, keeps the jobs your
+          search names, and scores each one against your resume. The first time takes about an hour;
+          keep the Mac awake and open. After that it runs by itself every morning.</div>
+        <div class="row" style="margin-top:9px">
+          <button class="btn primary" id="w-start" type="button" {% if s.morning.waiting or s.morning.running %}disabled{% endif %}>
+            {{ 'Find jobs now' if not s.jobs.open else 'Look again now' }}</button>
+          <a class="btn" href="{{ url_for('index') }}" id="w-jobs" {% if not s.jobs.open %}hidden{% endif %}>See your jobs →</a>
+          <label class="switch" title="Off: it runs only when you press the button"><input type="checkbox" id="w-auto"
+            {% if s.morning.auto %}checked{% endif %}> Every morning at 6 AM</label>
+        </div>
+        <div class="hint" id="w-find-say" aria-live="polite">
+          {%- if s.morning.waiting %}Upload your resume first.
+          {%- elif s.morning.running %}Finding jobs…
+          {%- elif s.jobs.open %}{{ '{:,}'.format(s.jobs.strong) }} strong matches so far.{% endif -%}
+        </div>
+      </div>
+    </li>
+  </ol>
+</section>
+
+<p class="hint w-where">Everything stays on this Mac, in <code>{{ s.folder }}</code>.
+  {%- if s.app_installed %} To update, repair or remove Job Applier, hold the Option key while you open it.{% endif %}</p>
+
+<style>
+  .welcome{margin-top:16px}
+  .w-search{display:grid;gap:10px;margin-top:9px;max-width:680px}
+  .w-search textarea{min-height:0}
+  .hint.warn{color:var(--warn);font-weight:600}
+  .w-where{margin-top:14px}
+  .w-where code{word-break:break-all}
+  #w-find .switch{margin-left:auto;font-weight:500}
+  @media (max-width:640px){ #w-find .switch{margin-left:0} }
+</style>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  async function ask(url, options, ms = 120000) {
+    const stop = new AbortController();
+    const timer = setTimeout(() => stop.abort(), ms);
+    try {
+      const r = await fetch(url, {...(options || {}), signal: stop.signal});
+      const body = await r.text();
+      try { return JSON.parse(body); } catch (e) { return {ok: false, error: `The app replied ${r.status}.`}; }
+    } catch (e) {
+      return {ok: false, error: e.name === 'AbortError' ? 'The app took too long to answer. Reload to see where it got to.'
+                                                        : 'Lost contact with the app. Reload this page.'};
+    } finally { clearTimeout(timer); }
+  }
+  const say = (el, text, kind) => { el.hidden = false; el.className = 'out' + (kind ? ' ' + kind : ''); el.textContent = text; };
+
+  $('w-upload').addEventListener('submit', async e => {
+    e.preventDefault();
+    const out = $('w-upload-out');
+    if (!$('w-file').files.length) return say(out, 'Choose your resume file first.', 'bad');
+    const body = new FormData();
+    body.append('resume', $('w-file').files[0]);
+    e.submitter && (e.submitter.disabled = true);
+    say(out, 'Reading your resume and making your search from it…');
+    const d = await ask('/upload', {method: 'POST', body}, 180000);
+    const s = d.search || {};
+    if (d.ok && s.ok) {
+      say(out, `${d.file} is in. Looking for ${s.title_count} job title${s.title_count === 1 ? '' : 's'}: `
+        + s.titles.slice(0, 6).join(', ') + (s.title_count > 6 ? '…' : '') + '.', 'good');
+      setTimeout(() => location.reload(), 2500);
+    } else if (d.ok) {
+      say(out, `${d.file} is in, but no job titles could be read from it. Add the ones you want in step 2.`, 'bad');
+      setTimeout(() => location.reload(), 3500);
+    } else {
+      e.submitter && (e.submitter.disabled = false);
+      say(out, d.error || d.output || 'The upload did not work.', 'bad');
+    }
+  });
+
+  const form = $('w-search-form');
+  if (form) form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const out = $('w-search-out');
+    const d = await ask('/search/save', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({titles: $('w-titles').value, locations: $('w-places').value, exclude_titles: $('w-skip').value})});
+    if (d.ok) { say(out, `Saved: ${d.search.titles.length} job titles.`, 'good'); setTimeout(() => location.reload(), 1200); }
+    else say(out, d.error || 'Not saved.', 'bad');
+  });
+
+  const findSay = $('w-find-say');
+  function minutes(s) {
+    if (s === null || s === undefined) return '';
+    const m = Math.round(s / 60);
+    return m < 2 ? ' · under 2 min left' : m < 60 ? ` · about ${m} min left` : ` · about ${(m / 60).toFixed(1)} h left`;
+  }
+  async function watch() {
+    const d = await ask('/run/scrape/status');
+    const p = (d && d.daily) || {};
+    if (d.ok && d.scheduled) {
+      findSay.textContent = p.stage === 'fetching' && p.total
+        ? `Reading job boards: ${p.done.toLocaleString()} of ${p.total.toLocaleString()} (${p.percent}%)${minutes(p.eta)}`
+        : ({scoring: 'Every board read · scoring the jobs against your resume…',
+            suggesting: 'Scored · finding skills worth adding for the best jobs…',
+            preparing: 'Preparing applications for the best matches…'}[p.stage] || 'Finding jobs…');
+      setTimeout(watch, 5000);
+      return;
+    }
+    const st = await ask('/welcome/state');
+    if (st.ok && st.jobs.open) {
+      findSay.textContent = `Done: ${st.jobs.open.toLocaleString()} jobs found, ${st.jobs.strong.toLocaleString()} strong matches.`;
+      $('w-jobs').hidden = false;
+      $('w-find').classList.add('done');
+    } else if (st.ok) {
+      findSay.textContent = st.morning.last && st.morning.last.how === 'failed'
+        ? 'The run stopped with a problem. The Health page says what went wrong.' : 'Finished.';
+    }
+    $('w-start').disabled = false;
+  }
+
+  $('w-start').addEventListener('click', async e => {
+    const b = e.currentTarget;
+    b.disabled = true;
+    findSay.textContent = 'Starting…';
+    const d = await ask('/run/morning/start', {method: 'POST'});
+    if (!d.ok) { b.disabled = false; findSay.textContent = d.error || 'Could not start.'; return; }
+    setTimeout(watch, 3000);
+  });
+  {% if s.morning.running %}watch();{% endif %}
+
+  $('w-auto').addEventListener('change', async e => {
+    const on = e.currentTarget.checked;
+    const d = await ask('/run/morning/auto', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                               body: JSON.stringify({on})});
+    if (!d.ok) { e.currentTarget.checked = !on; findSay.textContent = d.error || 'Not changed.'; }
+  });
+})();
+</script>
+{% endblock %}

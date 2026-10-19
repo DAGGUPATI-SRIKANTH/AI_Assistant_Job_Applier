@@ -226,6 +226,18 @@ def push_boards(say=print) -> bool:
     return True
 
 
+def set_up() -> bool:
+    """Whether this copy has a GitHub fetch at all: a passphrase in .env, gh, and a git checkout
+    for gh to ask about. A copy installed from the Mac app has none of these, and its morning
+    run reads the boards on the Mac without a word about GitHub."""
+    try:
+        _passphrase()
+        _tool("gh")
+    except CloudError:
+        return False
+    return (PROJECT_ROOT / ".git").exists()
+
+
 def main(argv: list[str]) -> int:
     command = argv[0] if argv else "state"
     try:
@@ -238,7 +250,9 @@ def main(argv: list[str]) -> int:
                 return 1
             print(json.dumps(collect(run["databaseId"], run["createdAt"])))
         elif command == "push-boards":
-            if not push_boards():
+            if not set_up():
+                print("no GitHub fetch is set up here; the board list stays on this Mac")
+            elif not push_boards():
                 print("the board list has not changed since it was last sent")
         else:
             print(__doc__)

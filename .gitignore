@@ -62,3 +62,6 @@ data/*.exit
 .env.bak*
 .env.*.backup
 .gstack/
+
+# The Mac app and its zip, built by devops/mac/build_app.sh.
+dist/

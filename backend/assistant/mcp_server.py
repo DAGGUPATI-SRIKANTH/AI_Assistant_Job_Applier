@@ -19,8 +19,9 @@ import urllib.request
 from mcp.server.mcpserver import MCPServer
 
 from backend.assistant import tools
+from backend.config.loader import web_port
 
-WEB_APP = "http://127.0.0.1:8770"
+WEB_APP = f"http://127.0.0.1:{web_port()}"
 
 server = MCPServer(
     "jobs",

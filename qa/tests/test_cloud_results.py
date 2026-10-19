@@ -163,6 +163,7 @@ def test_a_scheduled_morning_reads_no_board_here_when_the_cloud_did(tmp_path, mo
     monkeypatch.setattr("data_engineering.scraper.runner.run_scrape", lambda cfg: read_here.append(1))
     monkeypatch.setattr("data_engineering.scraper.runner.sync_seed_companies", lambda cfg: None)
     try:
+        monkeypatch.setattr(cloud_results, "set_up", lambda: True)
         monkeypatch.setattr(cloud_results, "bring_in", lambda say=print: {
             "added": 12, "refreshed": 900, "closed": 3, "reopened": 0, "boards": 21000, "run": 42})
         report = run_daily(Cfg(), cloud=True)
@@ -171,6 +172,11 @@ def test_a_scheduled_morning_reads_no_board_here_when_the_cloud_did(tmp_path, mo
         monkeypatch.setattr(cloud_results, "bring_in", lambda say=print: None)
         run_daily(Cfg(), cloud=True)
         assert read_here == [1]                                                # none today: read here
+        # A copy with no GitHub fetch (installed from the Mac app): no cloud stage at all.
+        monkeypatch.setattr(cloud_results, "bring_in", lambda say=print: pytest.fail("asked the cloud"))
+        monkeypatch.setattr(cloud_results, "set_up", lambda: False)
+        report = run_daily(Cfg(), cloud=True)
+        assert read_here == [1, 1] and "cloud" not in [s.name for s in report.stages]
     finally:
         session_mod._engine = None
         session_mod._SessionFactory = None

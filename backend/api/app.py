@@ -2351,17 +2351,39 @@ def _scheduled_run_holding(task: str) -> str | None:
     return None
 
 
+PIPELINE_SCRIPT = PROJECT_ROOT / "devops" / "daily_pipeline.sh"
+
+
+def pipeline_pids(task: str = "daily") -> list[int] | None:
+    """This copy's devops/daily_pipeline.sh running `task`, however it was started (launchd runs
+    `/bin/bash <script> daily`, and so does Start). None when the processes could not be listed.
+
+    Matched on the script's full path as bash's own arguments. `pgrep -f "daily_pipeline.sh
+    daily"` also matched any shell whose command merely mentioned it -- on 19 Oct a loop waiting
+    for the run to end was taken for the run, and Stop ended it with the run -- and it would
+    match another copy of the app on the same Mac."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    tail = f" {PIPELINE_SCRIPT} {task}"
+    found = []
+    for line in out.splitlines():
+        pid, _, args = line.strip().partition(" ")
+        args = args.strip()
+        if pid.isdigit() and args.endswith(tail) and args[:-len(tail)] in ("/bin/bash", "bash"):
+            found.append(int(pid))
+    return found
+
+
 def _pipeline_alive(task: str) -> bool:
     """Whether devops/daily_pipeline.sh is running `task` right now.
 
     A lock left behind by a run that was killed (or stopped from the Jobs page)
     kept the page at "6 AM fetch running" with nothing running at all."""
-    try:
-        out = subprocess.run(["pgrep", "-f", f"daily_pipeline.sh {task}"], capture_output=True,
-                             text=True, timeout=5).stdout
-    except (OSError, subprocess.SubprocessError):
-        return True                       # cannot tell: trust the lock, as before
-    return bool(out.split())
+    found = pipeline_pids(task)
+    return True if found is None else bool(found)       # cannot tell: trust the lock, as before
 
 
 def _lock_started(task: str) -> str:
@@ -2575,8 +2597,8 @@ def run_status(task: str):
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    cfg()
-    port = int(cfg().get("webapp.port", 8770) or 8770)
+    from backend.config.loader import web_port
+    port = web_port(cfg())
     print(f"\n  Job search console -> http://127.0.0.1:{port}\n")
     # Bound to localhost: this holds a resume and a job history, and it has no
     # login because it was never meant to be reachable from anywhere else.
@@ -2986,3 +3008,4 @@ from backend.api import watch_pages  # noqa: E402,F401
 from backend.api import inbox_pages  # noqa: E402,F401
 from backend.api import written_pages  # noqa: E402,F401
 from backend.api import morning_pages  # noqa: E402,F401
+from backend.api import welcome_pages  # noqa: E402,F401

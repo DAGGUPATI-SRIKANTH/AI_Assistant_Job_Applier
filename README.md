@@ -67,6 +67,9 @@ python3 -m venv .venv
 cp .env.example .env          # discovery and scoring need no API key
 ```
 
+On **Windows**, see [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md): different paths,
+UTF-8 mode, and which tests are macOS-only.
+
 **The web app** is where most of the work happens day to day:
 
 ```bash
@@ -305,6 +308,7 @@ devops/               DevOps / SRE
 
 qa/tests/             QA engineer: offline unit tests
 docs/archive/         the pre-merge README / PLAN / constraints, unedited
+docs/WINDOWS_SETUP.md setup on Windows, and what is macOS-only
 
 data/                 SQLite databases, logs, state, xlsx (gitignored)
 logs/                 run logs (gitignored)

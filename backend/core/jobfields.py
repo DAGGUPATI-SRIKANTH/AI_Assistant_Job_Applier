@@ -273,8 +273,106 @@ def workplace_label(value: str | None) -> str:
     return value or UNSTATED
 
 
+# -- what kind of job ---------------------------------------------------------------------------
+
+JOB_TYPES = {"full-time": "Full-time", "contract": "Contract", "contract-to-hire": "Contract-to-hire",
+             "part-time": "Part-time", "temporary": "Temporary", "internship": "Internship"}
+JOB_TYPE_SHORT = {"full-time": "Full-time", "contract": "Contract", "contract-to-hire": "C2H",
+                  "part-time": "Part-time", "temporary": "Temp", "internship": "Intern"}
+# A contract of any kind outranks full-time: "a full-time contract" is a contract.
+_TYPE_ORDER = ("contract-to-hire", "contract", "temporary", "internship", "part-time", "full-time")
+
+_C2H = r"\bcontract[\s-]+to[\s-]+(?:hire|perm(?:anent)?)\b|\b(?:c2h|cth)\b|\btemp(?:orary)?[\s-]+to[\s-]+(?:hire|perm(?:anent)?)\b"
+# "Contract Manager", "Contract Specialist": a job about contracts, not a contract job.
+_CONTRACT_WORK = (r"(?:manager|management|specialist|administrator|admin|analyst|negotiator|officer|coordinator|"
+                  r"compliance|attorney|lawyer|counsel|paralegal|reviewer|review|pricing|lead|associate|director|"
+                  r"closeout|accountant|operations|support|assistant|clerk)")
+# "(no C2C, no 1099, no third-party)", "not a contract role": what a posting says it is not.
+_NEGATED = re.compile(r"\b(?:no|not|non|without|excluding)[\s-]+(?:an?\s+|any\s+)?(?:c2c|corp[\s-]+to[\s-]+corp|1099|"
+                      r"contract(?:ors?|s)?|third[\s-]+part(?:y|ies)|w-?2)\b", re.I)
+_TITLE_RULES = (
+    ("contract-to-hire", re.compile(_C2H, re.I)),
+    ("contract", re.compile(r"\b(?:c2c|corp[\s-]+to[\s-]+corp|1099)\b", re.I)),
+    # Staffing firms' "W2 Role - Data Engineer" is a contract; "Engineer (Full-time W2)" is not.
+    ("contract", re.compile(r"^(?!.*\b(?:full[\s-]?time|permanent|fte)\b).*\bw-?2\b", re.I)),
+    ("contract", re.compile(rf"\bcontract(?:or)?\b(?!\s+{_CONTRACT_WORK}\b)", re.I)),
+    ("temporary", re.compile(r"\b(?:temp|temporary|seasonal)\b", re.I)),
+    ("internship", re.compile(r"\bintern(?:ship)?s?\b", re.I)),
+    ("part-time", re.compile(r"\bpart[\s-]?time\b", re.I)),
+    ("full-time", re.compile(r"\bfull[\s-]?time\b|\bpermanent\b", re.I)),
+)
+# "Employment type: Contract", "Job type: Full-time" (job alerts), "Position type: Contract to hire".
+_LABELLED = re.compile(r"\b(?:employment|job|position|work|worker|contract|role|engagement)[\s-]*"
+                       r"(?:type|status|category)\s*[:\-–]\s*([^\n|;•]{2,40})", re.I)
+_TEXT_RULES = (
+    ("contract-to-hire", re.compile(_C2H + r"|\bright[\s-]+to[\s-]+hire\b", re.I)),
+    ("contract", re.compile(
+        r"\b\d{1,2}\s*\+?\s*-?\s*(?:months?|mos?|weeks?)\b[^.\n]{0,25}?\bcontract\b"     # "6-month contract"
+        # Not "contract period" or "contract term", nor "work on a contract": in a defense posting those
+        # are the employer's government contract ("the contract period of performance").
+        r"|\bcontract\s+(?:role|position|assignment|engagement|opportunity|basis|job|duration|length)\b"
+        r"|\bthis\s+is\s+an?\s+(?:[\w-]+\s+){0,3}contract(?:\s+(?:role|position|job|assignment|opportunity|"
+        r"engagement|gig)\b|\s*[.,;!)]|\s+with\b)"
+        r"|\b(?:c2c|corp[\s-]+to[\s-]+corp)\b|\b1099\s+(?:contract|role|position|basis)\b"
+        r"|(?<!direct\s)\bw-?2\s+(?:contract|role)\b"          # not "a full-time, direct W2 position"
+        r"|\bduration\s*[:\-–]\s*\d+\s*\+?\s*(?:months?|weeks?|years?)\b", re.I)),
+    ("temporary", re.compile(r"\btemporary\s+(?:role|position|assignment|job|opportunity|basis)\b"
+                             r"|\bthis\s+is\s+a\s+temporary\b", re.I)),
+    ("internship", re.compile(r"\bthis\s+is\s+an?\s+(?:[\w-]+\s+){0,2}internship\b"
+                              r"|\b(?:summer|fall|spring|winter|paid)\s+internship\b", re.I)),
+    ("part-time", re.compile(r"\bthis\s+is\s+a\s+part[\s-]?time\b"
+                             r"|\bpart[\s-]?time\s+(?:role|position|job|opportunity|basis|schedule)\b", re.I)),
+    ("full-time", re.compile(r"\bthis\s+(?:is|will\s+be)\s+an?\s+(?:[\w-]+\s+){0,2}full[\s-]?time\b"
+                             r"|\bfull[\s-]?time\s+(?:role|position|job|opportunity|employment|employee|permanent|"
+                             r"salaried|exempt|w-?2|offers?)\b|\bpermanent\s+(?:role|position|job|full[\s-]?time)\b"
+                             # "the salary range for full-time employees for this position", "benefits for
+                             # full-time employees", "full-time employees are eligible / also receive"
+                             r"|\b(?:salary|pay|compensation|wage)\b[^.\n]{0,40}\bfor\s+full[\s-]?time\b"
+                             r"|\bbenefits?\b[^.\n]{0,60}\bfull[\s-]?time\s+employees\b"
+                             r"|\bfull[\s-]?time\s+employees\s+(?:are|also|have|receive|get|enjoy|can|may)\b"
+                             r"|\bfull[\s-]?time\s*,?\s*(?:direct\s+)?w-?2\b", re.I)),     # "full-time, direct W2"
+)
+
+
+def type_of(label: str | None) -> str | None:
+    """A kind of job from a board's own field or a labelled line: "Full-time", "FullTime",
+    "Contract to hire", "Contractor", "Temp", "Intern", "Permanent", "Contingent Worker"."""
+    t = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", label or "")           # "FullTime" -> "Full Time"
+    t = re.sub(r"[^a-z0-9]+", " ", t.lower()).strip()
+    if not t:
+        return None
+    if re.search(r"\bcontract (?:to|2) (?:hire|perm)|\bc2h\b|\bcth\b|\btemp (?:to|2) (?:hire|perm)|\bright to hire\b", t):
+        return "contract-to-hire"
+    if re.search(r"\b(?:contract|contractor|c2c|corp to corp|1099|fixed term|freelance|contingent|consultant)\b", t):
+        return "contract"
+    if re.search(r"\b(?:temp|temporary|seasonal)\b", t):
+        return "temporary"
+    if re.search(r"\bintern(?:ship)?\b", t):
+        return "internship"
+    if re.search(r"\bpart ?time\b", t):
+        return "part-time"
+    if re.search(r"\bfull ?time\b|\bpermanent\b|\bregular\b|\bemployee\b", t):
+        return "full-time"
+    return None
+
+
+def job_type(title: str | None, description: str | None, requirements: str | None = None,
+             stated: str | None = None) -> str | None:
+    """What kind of job a posting is, from what it states: its title, its board's own field,
+    a labelled line ("Employment type: Contract") and its wording ("a 6-month contract"). A
+    contract of any kind outranks full-time. Nothing stated is None -- never a guess."""
+    heading = _NEGATED.sub(" ", _normalise(title))
+    found: set[str | None] = {kind for kind, rule in _TITLE_RULES if rule.search(heading)}
+    found.add(type_of(stated))
+    text = _NEGATED.sub(" ", _normalise("\n".join(part for part in (description, requirements) if part)[:30000]))
+    found.update(type_of(m.group(1)) for m in _LABELLED.finditer(text))
+    found.update(kind for kind, rule in _TEXT_RULES if rule.search(text))
+    return next((kind for kind in _TYPE_ORDER if kind in found), None)
+
+
 def derive(title: str | None, location: str | None,
-           description: str | None, requirements: str | None) -> dict[str, object]:
+           description: str | None, requirements: str | None,
+           stated_job_type: str | None = None) -> dict[str, object]:
     """Every derived field for one posting, as column -> value.
 
     One function so the scrape and the backfill cannot drift: a parser fix has
@@ -289,6 +387,7 @@ def derive(title: str | None, location: str | None,
     pay = salary(description)
     return {
         "workplace": workplace(location, title),
+        "job_type": job_type(title, description, requirements, stated_job_type),
         "experience_min_years": low,
         "experience_max_years": high,
         "salary_min": pay.low if pay else None,
@@ -303,10 +402,12 @@ ELIGIBILITY_FIELDS = ("clearance", "clearance_active", "polygraph", "citizenship
 
 
 def derived_for(job, fields: dict) -> dict:
-    """The derived fields to write to an existing job: the person's own
-    clearance/citizenship/visa corrections are never overwritten."""
+    """The derived fields to write to an existing job: the person's own corrections -- clearance,
+    citizenship, visa, and the kind of job -- are never overwritten."""
     if getattr(job, "eligibility_manual", None):
-        return {k: v for k, v in fields.items() if k not in ELIGIBILITY_FIELDS}
+        fields = {k: v for k, v in fields.items() if k not in ELIGIBILITY_FIELDS}
+    if getattr(job, "job_type_manual", None):
+        fields = {k: v for k, v in fields.items() if k != "job_type"}
     return fields
 
 

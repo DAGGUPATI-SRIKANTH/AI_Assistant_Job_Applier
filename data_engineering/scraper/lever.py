@@ -81,6 +81,7 @@ class LeverScraper(PortalScraper):
             requirements=_requirements_from_lists(entry) or extract_requirements(full_description),
             application_url=entry.get("hostedUrl") or entry.get("applyUrl") or "",
             posted_at=_parse_epoch_ms(entry.get("createdAt")),
+            job_type=categories.get("commitment"),     # Lever's own field: "Full-time", "Contract"…
         )
 
 

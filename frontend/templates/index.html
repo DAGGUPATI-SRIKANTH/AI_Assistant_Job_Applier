@@ -259,9 +259,9 @@
 </div>
 <div class="rulebar" id="rulebar">
   <span class="sub">Filter by</span>
-  <span class="rule"><select class="efilter rule-col" data-n="0" aria-label="Filter 1: column"><option value="">Choose a column…</option><option value="score">Fit</option><option value="ageDays">Age</option><option value="workplace">Where</option><option value="location">Location</option><option value="expMin">Experience</option><option value="payMin">Salary</option><option value="company">Company</option><option value="title">Role</option><option value="clr">Clearance</option><option value="citizen">Citizen</option><option value="visa">Visa</option><option value="board">Board</option><option value="status">Status</option></select><span class="rule-val" id="rv0"></span></span>
-  <span class="rule"><select class="efilter rule-col" data-n="1" aria-label="Filter 2: column"><option value="">Choose a column…</option><option value="score">Fit</option><option value="ageDays">Age</option><option value="workplace">Where</option><option value="location">Location</option><option value="expMin">Experience</option><option value="payMin">Salary</option><option value="company">Company</option><option value="title">Role</option><option value="clr">Clearance</option><option value="citizen">Citizen</option><option value="visa">Visa</option><option value="board">Board</option><option value="status">Status</option></select><span class="rule-val" id="rv1"></span></span>
-  <span class="rule"><select class="efilter rule-col" data-n="2" aria-label="Filter 3: column"><option value="">Choose a column…</option><option value="score">Fit</option><option value="ageDays">Age</option><option value="workplace">Where</option><option value="location">Location</option><option value="expMin">Experience</option><option value="payMin">Salary</option><option value="company">Company</option><option value="title">Role</option><option value="clr">Clearance</option><option value="citizen">Citizen</option><option value="visa">Visa</option><option value="board">Board</option><option value="status">Status</option></select><span class="rule-val" id="rv2"></span></span>
+  <span class="rule"><select class="efilter rule-col" data-n="0" aria-label="Filter 1: column"><option value="">Choose a column…</option><option value="score">Fit</option><option value="ageDays">Age</option><option value="workplace">Where</option><option value="location">Location</option><option value="jobType">Job type</option><option value="expMin">Experience</option><option value="payMin">Salary</option><option value="company">Company</option><option value="title">Role</option><option value="clr">Clearance</option><option value="citizen">Citizen</option><option value="visa">Visa</option><option value="board">Board</option><option value="status">Status</option></select><span class="rule-val" id="rv0"></span></span>
+  <span class="rule"><select class="efilter rule-col" data-n="1" aria-label="Filter 2: column"><option value="">Choose a column…</option><option value="score">Fit</option><option value="ageDays">Age</option><option value="workplace">Where</option><option value="location">Location</option><option value="jobType">Job type</option><option value="expMin">Experience</option><option value="payMin">Salary</option><option value="company">Company</option><option value="title">Role</option><option value="clr">Clearance</option><option value="citizen">Citizen</option><option value="visa">Visa</option><option value="board">Board</option><option value="status">Status</option></select><span class="rule-val" id="rv1"></span></span>
+  <span class="rule"><select class="efilter rule-col" data-n="2" aria-label="Filter 3: column"><option value="">Choose a column…</option><option value="score">Fit</option><option value="ageDays">Age</option><option value="workplace">Where</option><option value="location">Location</option><option value="jobType">Job type</option><option value="expMin">Experience</option><option value="payMin">Salary</option><option value="company">Company</option><option value="title">Role</option><option value="clr">Clearance</option><option value="citizen">Citizen</option><option value="visa">Visa</option><option value="board">Board</option><option value="status">Status</option></select><span class="rule-val" id="rv2"></span></span>
   <button class="btn primary" id="rules-go">Go</button>
   <button class="btn" id="rules-reset">Reset</button>
   <span class="sub" id="rules-note"></span>
@@ -290,6 +290,11 @@
 @media (min-width:1300px){.wrap,.appbar-in{max-width:1400px}}
 #rows td.loc span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 #rows td.loc .more{color:var(--muted);font-size:12px;flex:none}
+#rows td.jt{white-space:nowrap;font-size:13px;color:var(--ink-2)}
+#rows td.jt.jt-contract{color:var(--warn);font-weight:600}
+@media (min-width:1600px){.wrap,.appbar-in{max-width:1560px}}   /* room for every column on a wide screen */
+/* A 1440 screen: the Job type column fits beside the rest when Location and Role give a little. */
+@media (max-width:1599px){ #rows td.loc div{max-width:110px} #rows td.ti{min-width:165px;max-width:165px} }
 .watch-note a{font-weight:600}
 </style>
 <p class="sub phone-only">Swipe the table sideways to see every column.</p>
@@ -301,6 +306,7 @@
       <th data-k="ageDays" aria-sort="ascending">Age <span class="ar">▲</span></th>
       <th data-k="workplace">Where</th>
       <th data-k="place" title="Where the job is; +N when the posting names more places (hover to see them)">Location</th>
+      <th data-k="jobType" title="Full-time, contract, C2H (contract-to-hire), part-time… as the posting or its board says it. Blank: not stated. Correct it on the job's page.">Job type</th>
       <th data-k="expMin">Exp</th>
       <th data-k="payMin">Salary</th>
       <th data-k="company">Company</th>
@@ -350,7 +356,7 @@ const MY_YEARS = {{ my_years or 'null' }};
 // Up to three sorts, applied in order: the second breaks ties in the first, the third in the second.
 let sorts = [{k: 'ageDays', dir: 1}];
 // Text sorts A-Z first; numbers biggest first, except age, where newest (smallest) leads.
-const TEXT_KEYS = ['company', 'title', 'board', 'workplace', 'place', 'status', 'citizen', 'visa'];
+const TEXT_KEYS = ['company', 'title', 'board', 'workplace', 'place', 'jobType', 'status', 'citizen', 'visa'];
 const firstDir = k => TEXT_KEYS.includes(k) || k === 'ageDays' ? 1 : -1;
 
 function visible() {
@@ -465,7 +471,7 @@ function render() {
         : r.basis === 'title'
           ? `<span class="sc sc-part" title="Measured against the title only — this posting came from a job alert with no description, so the number is not comparable with the others">~${r.score}</span>`
           : `<span class="sc sc-${band(r.score)}">${r.score}</span>`}</td>
-      <td class="num age"></td><td class="num dim w"></td><td class="loc"><div><span></span><span class="more"></span></div></td><td class="num dim e"></td>
+      <td class="num age"></td><td class="num dim w"></td><td class="loc"><div><span></span><span class="more"></span></div></td><td class="jt"></td><td class="num dim e"></td>
       <td class="num y"></td><td class="co"></td>
       <td class="ti"><button class="star" type="button" data-star="${r.id}" aria-pressed="${r.starred}"
         title="${r.starred ? 'On your Watch list — press to take it off' : 'Save to your Watch list'}"
@@ -482,6 +488,11 @@ function render() {
     const place = placeOf(r.location, r.workplace), loc = tr.querySelector('.loc');
     loc.querySelector('span').textContent = place.first;
     loc.querySelector('.more').textContent = place.more ? `+${place.more}` : '';
+    const jt = tr.querySelector('.jt');
+    jt.textContent = r.jobType;
+    jt.title = r.jobTypeFull ? r.jobTypeFull + (r.jobTypeManual ? ' (set by you)' : '')
+                             : "Not stated in the posting: set it on the job's page";
+    if (r.jobTypeCode === 'contract' || r.jobTypeCode === 'contract-to-hire') jt.classList.add('jt-contract');
     if (place.all) loc.title = place.all;
     tr.querySelector('.e').textContent = r.experience;
     tr.querySelector('.y').textContent = r.salary;
@@ -1051,6 +1062,12 @@ const RULES = {
   payMin: {opts: [['100000', '$100K+'], ['150000', '$150K+'], ['200000', '$200K+'], ['any', 'Published'], ['none', 'Not published']],
            test: (r, v) => v === 'none' ? r.payMin === null : v === 'any' ? r.payMin !== null : (r.payMin !== null && r.payMin >= +v)},
   location: {text: 'city, state or Remote…', test: (r, v) => placeHas(r.location, v)},
+  jobType: {opts: [['full-time', 'Full-time'], ['contract', 'Contract'], ['contract-to-hire', 'Contract-to-hire'],
+                   ['any-contract', 'Any contract (with C2H)'], ['part-time', 'Part-time'], ['temporary', 'Temporary'],
+                   ['internship', 'Internship'], ['none', 'Not stated']],
+            test: (r, v) => v === 'none' ? !r.jobTypeCode
+                          : v === 'any-contract' ? ['contract', 'contract-to-hire'].includes(r.jobTypeCode)
+                          : r.jobTypeCode === v},
   company: {text: 'contains…', test: (r, v) => (r.company || '').toLowerCase().includes(v.toLowerCase())},
   title: {text: 'contains…', test: (r, v) => (r.title || '').toLowerCase().includes(v.toLowerCase())},
   clr: {opts: [['none', 'No clearance asked'], ['ok', 'None, or can obtain'], ['hold', 'Must already hold'],

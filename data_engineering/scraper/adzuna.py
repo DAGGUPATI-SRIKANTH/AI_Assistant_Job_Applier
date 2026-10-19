@@ -34,6 +34,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from backend.core.jobfields import job_type
 from data_engineering.scraper.base import RawJob
 
 log = logging.getLogger(__name__)
@@ -78,6 +79,17 @@ class AdzunaJob:
     salary_max: int | None = None
 
 
+def _stated_type(result: dict) -> str | None:
+    """Adzuna's own fields, as one word: contract_type "contract" or "permanent", contract_time
+    "full_time" or "part_time"."""
+    kind, hours = result.get("contract_type") or "", result.get("contract_time") or ""
+    if kind == "contract":
+        return "Contract"
+    if hours in ("full_time", "part_time"):
+        return hours.replace("_", "-").capitalize()
+    return "Permanent" if kind == "permanent" else None
+
+
 def parse_result(result: dict) -> AdzunaJob | None:
     """One API result, or None when it lacks what a posting needs."""
     title = _clean(result.get("title"))
@@ -102,6 +114,7 @@ def parse_result(result: dict) -> AdzunaJob | None:
             description=_clean(result.get("description")) or None,
             application_url=url,
             posted_at=_when(result.get("created")),
+            job_type=_stated_type(result),
         ),
         salary_min=None if predicted or low is None else int(low),
         salary_max=None if predicted or high is None else int(high),
@@ -217,6 +230,10 @@ def store(jobs: list[AdzunaJob]) -> tuple[int, int, int]:
                         .filter_by(source=SOURCE, external_id=raw.external_id).one_or_none())
             if existing is not None:
                 existing.last_seen_at = utcnow()
+                if raw.job_type and raw.job_type != existing.stated_job_type:
+                    existing.stated_job_type = raw.job_type
+                    if not existing.job_type_manual:
+                        existing.job_type = job_type(existing.title, existing.description, None, raw.job_type)
                 seen += 1
                 continue
             if _key(raw.company, raw.title) in elsewhere:
@@ -232,7 +249,8 @@ def store(jobs: list[AdzunaJob]) -> tuple[int, int, int]:
                 salary_period="year" if job.salary_min or job.salary_max else None,
                 content_hash=hashlib.sha256(
                     f"{SOURCE}{raw.external_id}{raw.title}".encode()).hexdigest(),
-                is_open=True,
+                is_open=True, stated_job_type=raw.job_type,
+                job_type=job_type(raw.title, raw.description, None, raw.job_type),
             ))
             new += 1
     return new, seen, duplicates

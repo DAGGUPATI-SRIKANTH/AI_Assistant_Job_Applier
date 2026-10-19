@@ -34,6 +34,7 @@ class RawJob:
     application_url: str
     posted_at: datetime | None = None
     requirements: str | None = None
+    job_type: str | None = None          # the board's own word: "Full-time", "Contract", "FullTime"…
 
 
 class PortalScraper(ABC):

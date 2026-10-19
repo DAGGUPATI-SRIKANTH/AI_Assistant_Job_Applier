@@ -31,7 +31,8 @@ from backend.config.loader import PROJECT_ROOT, load_config
 from data_engineering.db.models import Job, STATUS_VALUES
 from data_engineering.db.session import get_session, init_engine
 from backend.core.jobage import age_days, age_label
-from backend.core.jobfields import UNSTATED, experience_label, salary_label, workplace_label
+from backend.core.jobfields import (JOB_TYPE_SHORT, JOB_TYPES, UNSTATED, experience_label, salary_label,
+                                    workplace_label)
 
 log = logging.getLogger(__name__)
 
@@ -135,6 +136,11 @@ def job_row(job: Job) -> dict:
         # though its age were unknown.
         "ageDays": age_days(job),
         "workplace": stated(workplace_label(job.workplace)),
+        # Full-time, Contract, C2H…: short in the column, whole on hover and on the job's page.
+        "jobType": JOB_TYPE_SHORT.get(job.job_type or "", ""),
+        "jobTypeFull": JOB_TYPES.get(job.job_type or "", ""),
+        "jobTypeCode": job.job_type or "",
+        "jobTypeManual": bool(job.job_type_manual),
         "experience": stated(experience_label(job.experience_min_years,
                                               job.experience_max_years)),
         "salary": stated(salary_label(job.salary_min, job.salary_max,
@@ -596,7 +602,7 @@ def job_detail(job_id: int):
         templates=_template_choices(), template_pick=template_pick,
         starred=job_id in _starred(),
         application=application, stages=tracker.STAGES,
-        closed_text=_day_text(closed), redo=_redo_reason(job_id),
+        closed_text=_day_text(closed), redo=_redo_reason(job_id), job_types=JOB_TYPES,
     )
 
 
@@ -1512,6 +1518,29 @@ def job_suggestions_accept(job_id: int):
     return jsonify(ok=True, added=added, problems=problems)
 
 
+@app.post("/job/<int:job_id>/job-type")
+def job_type_set(job_id: int):
+    """The person's own reading of what kind of job it is, kept over re-reading the posting.
+    {"type": "contract"} sets it ("" for "not stated"); {"reset": true} goes back to the posting's."""
+    from backend.core.jobfields import job_type
+    body = request.get_json(silent=True) or {}
+    with get_session() as session:
+        job = session.get(Job, job_id)
+        if job is None:
+            return jsonify(ok=False, error="No such job."), 404
+        if body.get("reset"):
+            job.job_type = job_type(job.title, job.description, job.requirements, job.stated_job_type)
+            job.job_type_manual = None
+        else:
+            kind = str(body.get("type") or "")
+            if kind and kind not in JOB_TYPES:
+                return jsonify(ok=False, error="Unknown kind of job."), 400
+            job.job_type, job.job_type_manual = kind or None, True
+        job.exported_to_excel = False
+        return jsonify(ok=True, type=job.job_type or "", label=JOB_TYPES.get(job.job_type or "", ""),
+                       manual=bool(job.job_type_manual))
+
+
 @app.post("/job/<int:job_id>/eligibility")
 def job_eligibility(job_id: int):
     """The person's own reading of clearance, citizenship and visa, kept over re-parsing.
@@ -1526,7 +1555,7 @@ def job_eligibility(job_id: int):
         if job is None:
             return jsonify(ok=False, error="No such job."), 404
         if body.get("reset"):
-            parsed = derive(job.title, job.location, job.description, job.requirements)
+            parsed = derive(job.title, job.location, job.description, job.requirements, job.stated_job_type)
             for field in ELIGIBILITY_FIELDS:
                 setattr(job, field, parsed[field])
             job.eligibility_manual = None

@@ -301,6 +301,28 @@ def cmd_export(cfg, args) -> int:
     return 0
 
 
+def cmd_job_types(cfg, args) -> int:
+    """What kind of job each posting is, read again from what is stored: no network. A kind the
+    person set on a job's page is kept."""
+    init_engine(cfg.database_url)
+    from collections import Counter
+
+    from backend.core.jobfields import job_type
+    from data_engineering.db.models import Job
+    from data_engineering.db.session import get_session
+    changed, kinds = 0, Counter()
+    with get_session() as session:
+        for job in session.query(Job).filter(Job.job_type_manual.isnot(True)):
+            kind = job_type(job.title, job.description, job.requirements, job.stated_job_type)
+            kinds[kind or "not stated"] += 1
+            if kind != job.job_type:
+                job.job_type = kind
+                job.exported_to_excel = False
+                changed += 1
+    print(f"{changed} job(s) changed; " + ", ".join(f"{k}: {n}" for k, n in kinds.most_common()))
+    return 0
+
+
 def cmd_reparse(cfg, args) -> int:
     """Re-derive the requirements section from stored JDs (no network calls).
 
@@ -328,7 +350,8 @@ def cmd_reparse(cfg, args) -> int:
             # never rewritten and these columns would stay empty forever.
             from backend.core.jobfields import derived_for
             for column, value in derived_for(job, derive(job.title, job.location,
-                                                         job.description, job.requirements)).items():
+                                                         job.description, job.requirements,
+                                                         job.stated_job_type)).items():
                 if getattr(job, column) != value:
                     setattr(job, column, value)
                     touched = True
@@ -1019,6 +1042,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--all", action="store_true", help="Re-export every job, not just new ones"
     )
 
+    sub.add_parser("job-types", help="What kind of job each posting is, read again (no network)")
     p_reparse = sub.add_parser(
         "reparse", help="Re-derive fields from stored JDs (no network)")
     p_reparse.add_argument("--limit", type=int, default=0,
@@ -1185,6 +1209,7 @@ COMMANDS = {
     "import-csv": cmd_import_csv,
     "export": cmd_export,
     "reparse": cmd_reparse,
+    "job-types": cmd_job_types,
     "profile": cmd_profile,
     "prune": cmd_prune,
     "daily": cmd_daily,

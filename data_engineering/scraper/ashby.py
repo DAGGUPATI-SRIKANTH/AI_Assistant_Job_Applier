@@ -88,6 +88,7 @@ class AshbyScraper(PortalScraper):
             requirements=extract_requirements(description),
             application_url=entry.get("applyUrl") or entry.get("jobUrl") or "",
             posted_at=_parse_date(entry.get("publishedAt")),
+            job_type=entry.get("employmentType"),      # Ashby's own field: "FullTime", "Contract"…
         )
 
 

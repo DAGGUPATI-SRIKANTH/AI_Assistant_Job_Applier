@@ -347,8 +347,9 @@ def _persist(jobs: list[RawJob]) -> tuple[int, int]:
                         application_url=raw.application_url,
                         posted_at=raw.posted_at,
                         content_hash=content_hash,
+                        stated_job_type=raw.job_type,
                         **derive(raw.title, raw.location,
-                                 raw.description, raw.requirements),
+                                 raw.description, raw.requirements, raw.job_type),
                     )
                 )
                 new_count += 1
@@ -360,12 +361,22 @@ def _persist(jobs: list[RawJob]) -> tuple[int, int]:
                 existing.requirements = raw.requirements
                 existing.application_url = raw.application_url
                 existing.content_hash = content_hash
+                existing.stated_job_type = raw.job_type or existing.stated_job_type
                 from backend.core.jobfields import derived_for
                 for field, value in derived_for(existing, derive(raw.title, raw.location,
-                                                raw.description, raw.requirements)).items():
+                                                raw.description, raw.requirements,
+                                                existing.stated_job_type)).items():
                     setattr(existing, field, value)
                 existing.exported_to_excel = False  # re-export in Phase 2
                 updated_count += 1
+            elif raw.job_type and raw.job_type != existing.stated_job_type:
+                # The text is the same, but the board now says what kind of job it is (or says
+                # it differently): weigh that, unless the person has set it themselves.
+                from backend.core.jobfields import job_type
+                existing.stated_job_type = raw.job_type
+                if not existing.job_type_manual:
+                    existing.job_type = job_type(existing.title, existing.description,
+                                                 existing.requirements, raw.job_type)
 
     return new_count, updated_count
 

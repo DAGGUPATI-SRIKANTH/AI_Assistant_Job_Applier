@@ -99,11 +99,25 @@
     <a href="/tailor?job={{ job.id }}&start=1" title="Open Resume Tailoring with this posting filled in: full match report, gaps and a tailored resume">Tailor ↗</a></span>
   <span>Posted <b>{{ job.age }}</b></span>
   {% if job.workplace %}<span>Workplace <b>{{ job.workplace }}</b></span>{% endif %}
+  <span id="jt">Job type <b id="jt-now">{{ job.jobTypeFull or 'not stated' }}</b>{% if job.jobTypeManual %}
+    <span class="hint">(set by you)</span>{% endif %}
+    <button class="linkish" type="button" id="jt-edit" title="Read the posting and set what kind of job it is">Change</button></span>
   {% if job.experience %}<span>Wants <b>{{ job.experience }}</b></span>{% endif %}
   {% if job.salary %}<span>Pays <b>{{ job.salary }}</b></span>{% endif %}
   <span>Board <b>{{ job.board }}</b></span>
   {% if job.location %}<span>{{ job.location }}</span>{% endif %}
 </div>
+<form class="jt-form" id="jt-form" hidden>
+  <label>Job type
+    <select id="jt-pick">
+      <option value="">Not stated</option>
+      {% for code, label in job_types.items() %}<option value="{{ code }}" {% if job.jobTypeCode == code %}selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select></label>
+  <button class="btn primary" type="submit">Save</button>
+  <button class="btn" type="button" id="jt-cancel">Cancel</button>
+  {% if job.jobTypeManual %}<button class="btn" type="button" id="jt-reset" title="Forget your choice and use what the posting says">Use the posting's reading</button>{% endif %}
+  <span class="hint" id="jt-say">Kept over re-scrapes and re-reading of the posting.</span>
+</form>
 <div class="meta etags" id="etags">
   {% for g in job.tags %}<span class="etag etag-{{ g.k }}">{{ g.t }}</span>{% endfor %}
   {% if not job.tags %}<span class="sub">No clearance, citizenship or visa rule found in the posting.</span>{% endif %}
@@ -1153,6 +1167,18 @@ if ($('as')) {
         || await record('closed', '', 'The posting was taken down', b)) b.remove();
   });
 }
+
+// -- What kind of job: corrected here when the posting's reading is wrong or missing ------
+$('jt-edit')?.addEventListener('click', () => { $('jt-form').hidden = false; $('jt-edit').hidden = true; $('jt-pick').focus(); });
+$('jt-cancel')?.addEventListener('click', () => { $('jt-form').hidden = true; $('jt-edit').hidden = false; });
+async function sendJobType(body) {
+  const r = await ask(`/job/${JOB}/job-type`, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                               body: JSON.stringify(body)});
+  if (!r.ok) { $('jt-say').textContent = r.error || 'Not saved.'; return; }
+  location.reload();
+}
+$('jt-form')?.addEventListener('submit', e => { e.preventDefault(); sendJobType({type: $('jt-pick').value}); });
+$('jt-reset')?.addEventListener('click', () => sendJobType({reset: true}));
 
 // -- Correct the clearance / citizenship / visa reading after reviewing the posting ------
 $('elig-edit')?.addEventListener('click', () => { $('elig-form').hidden = false; $('elig-edit').hidden = true; });

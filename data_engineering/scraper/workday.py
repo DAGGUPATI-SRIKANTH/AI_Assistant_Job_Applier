@@ -230,6 +230,7 @@ class WorkdayScraper(PortalScraper):
             # URL path changes whenever the title is edited.
             stub.external_id = str(info.get("jobReqId") or stub.external_id)
             stub.application_url = info.get("externalUrl") or stub.application_url
+            stub.job_type = info.get("timeType")        # Workday's own field: "Full time", "Part time"
             filled.append(stub)
         if len(stubs) > MAX_DETAILS:
             log.info("%s: %d postings matched, fetching the first %d",

@@ -133,6 +133,13 @@ class Job(Base):
     # only refreshes them when the text itself changed; `reparse` is what
     # backfills existing rows and re-derives after a parser fix.
     workplace: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # What kind of job: full-time, contract, contract-to-hire, part-time, temporary, internship
+    # (backend/core/jobfields.job_type), from the title, the board's own word for it and the text.
+    job_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # The board's own word ("Full-time" from Lever, "FullTime" from Ashby), kept for re-reading.
+    stated_job_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # Set by the person on the job's page: re-reading leaves job_type alone.
+    job_type_manual: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     experience_min_years: Mapped[int | None] = mapped_column(Integer, nullable=True)
     experience_max_years: Mapped[int | None] = mapped_column(Integer, nullable=True)
     salary_min: Mapped[int | None] = mapped_column(Integer, nullable=True)

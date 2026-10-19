@@ -2161,7 +2161,8 @@ def start_task(task: str, args: list[str]):
     # the answer and everything else is a guess, so write it to a file that
     # outlives the process -- this app cannot wait() on a detached child.
     if os.name == "nt":
-        process = _start_task_windows(args, exit_path, handle)
+        handle.close()
+        process = _start_task_windows(args, exit_path, log_path)
         task_pid_file(task).write_text(f"{process.pid}\n{time.time()}")
         return jsonify(ok=True, started=True)
     command = " ".join(shlex.quote(part) for part in
@@ -2177,21 +2178,28 @@ def start_task(task: str, args: list[str]):
     return jsonify(ok=True, started=True)
 
 
-def _start_task_windows(args: list[str], exit_path: Path, handle) -> subprocess.Popen:
-    """start_task on Windows, which has no /bin/sh: Python writes the exit code down instead."""
-    wrapper = ("import subprocess, sys; code = subprocess.call(sys.argv[2:]); "
-               "open(sys.argv[1], 'w').write(f'{code}\\n')")
-    command = [sys.executable, "-X", "utf8", "-c", wrapper, str(exit_path),
+def _start_task_windows(args: list[str], exit_path: Path, log_path: Path) -> subprocess.Popen:
+    """start_task on Windows, which has no /bin/sh: Python writes the exit code down instead.
+
+    The wrapper hands the log to main.py itself: under pythonw.exe (devops/windows/) a child
+    started without explicit handles inherits no output, and the page read an empty log.
+    """
+    wrapper = ("import subprocess, sys\n"
+               "with open(sys.argv[2], 'ab') as log:\n"
+               "    code = subprocess.call(sys.argv[3:], stdout=log, stderr=subprocess.STDOUT,\n"
+               "                           stdin=subprocess.DEVNULL)\n"
+               "open(sys.argv[1], 'w').write(f'{code}\\n')\n")
+    command = [sys.executable, "-X", "utf8", "-c", wrapper, str(exit_path), str(log_path),
                sys.executable, "-X", "utf8", "-u", "main.py", *args]
     # Its own process group, and out of the app's job object (devops/windows/run_webapp.py) where
     # that allows it, so restarting this app does not kill half an hour of scraping.
     flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    quiet = dict(cwd=PROJECT_ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                 stderr=subprocess.DEVNULL)
     try:
-        return subprocess.Popen(command, cwd=PROJECT_ROOT, stdout=handle, stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB)
+        return subprocess.Popen(command, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **quiet)
     except PermissionError:          # a job that does not allow breakaway
-        return subprocess.Popen(command, cwd=PROJECT_ROOT, stdout=handle, stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL, creationflags=flags)
+        return subprocess.Popen(command, creationflags=flags, **quiet)
 
 
 @app.get("/run/probe/status")

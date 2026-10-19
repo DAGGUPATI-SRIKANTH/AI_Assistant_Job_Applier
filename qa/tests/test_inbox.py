@@ -10,6 +10,9 @@ from data_engineering.db.models import Job
 from data_engineering.db.session import get_session, init_engine
 
 NOW = datetime.now(timezone.utc)
+# What Gmail adds to mail that really came from Lever's hiring system.
+LEVER_AUTH = ("mx.google.com; dkim=pass header.i=@hire.lever.co header.s=k1 header.b=abc; spf=pass "
+              "smtp.mailfrom=no-reply@hire.lever.co; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=hire.lever.co")
 
 
 @pytest.fixture
@@ -118,10 +121,10 @@ def test_a_receipt_and_the_rejection_after_it_in_one_look(db, monkeypatch):
     """One look: the receipt made it an application, and the rejection three days later had to count too."""
     sent = NOW - timedelta(days=4)
     mail = [
-        {"uid": b"1", "id": "z1", "from": "Hooli AI <no-reply@hire.lever.co>", "date": sent,
+        {"uid": b"1", "id": "z1", "from": "Hooli AI <no-reply@hire.lever.co>", "date": sent, "auth": LEVER_AUTH,
          "subject": "Thank you for your application to Hooli AI"},
         {"uid": b"2", "id": "z2", "from": "Hooli AI <no-reply@hire.lever.co>", "date": sent + timedelta(days=3),
-         "subject": "Your Hooli AI Application: Staff Platform Engineer"},
+         "auth": LEVER_AUTH, "subject": "Your Hooli AI Application: Staff Platform Engineer"},
     ]
     texts = {b"1": "We received your application for Staff Platform Engineer (R1002), and we are delighted.",
              b"2": "For the Staff Platform Engineer (R1002) role, we have identified other candidates and will not "
@@ -165,3 +168,46 @@ def test_a_closed_role_becomes_the_applications_stage_and_leaves_its_status(db):
     assert update["change"] == "Position closed" and update["label"] == "Position closed"
     a = tracker.application(2)
     assert a["current"] == "Position closed" and a["status"] == "Applied"
+
+
+# -- only mail that provably came from the employer or its hiring system moves an application ------
+
+def test_a_sender_name_or_a_look_alike_domain_moves_nothing(db):
+    among = inbox.targets()
+    rejection = ("Your application", "Unfortunately the position has been closed.")
+    # Anyone can write "Globex" as a sender's name, or make "globex" the first part of their own domain.
+    assert inbox.match("Globex <hr@attacker.example>", *rejection, among, NOW) is None
+    assert inbox.match("Talent <hr@globex.attacker.example>", *rejection, among, NOW) is None
+    # The employer's own domain, and a hiring system writing for it, still count.
+    assert inbox.match("Talent <hr@globex.com>", *rejection, among, NOW).job_id == 2
+    assert inbox.match("Globex <no-reply@applytojob.com>", *rejection, among, NOW).job_id == 2
+
+
+def test_only_authenticated_mail_counts():
+    assert inbox.verified("Hooli AI <no-reply@hire.lever.co>", LEVER_AUTH) == "lever.co"
+    assert inbox.verified("Talent <hr@globex.com>", "mx.google.com; dkim=pass header.d=globex.com; "
+                                                    "dmarc=pass header.from=globex.com") == "globex.com"
+    assert inbox.verified("Globex <hr@globex.com>", "mx.google.com; spf=softfail; dmarc=fail header.from=globex.com") is None
+    # Signed, but by someone else's domain: not proof the mail is Globex's.
+    assert inbox.verified("Globex <hr@globex.com>", "mx.google.com; dkim=pass header.i=@sender.example") is None
+    assert inbox.verified("Globex <hr@globex.com>", "") is None
+    assert inbox.registrable("us.greenhouse-mail.io") == "greenhouse-mail.io"
+    assert inbox.registrable("mail.globex.co.uk") == "globex.co.uk"
+
+
+def test_unauthenticated_mail_never_moves_an_application(db, monkeypatch):
+    spoof = [{"uid": b"9", "id": "s1", "from": "Globex <no-reply@applytojob.com>", "date": NOW - timedelta(hours=2),
+              "auth": "mx.google.com; spf=fail; dmarc=fail header.from=applytojob.com",
+              "subject": "Your Application with Globex"}]
+
+    class FakeBox:
+        conn = None
+        def __init__(self, creds): pass
+        def body(self, uid): return "Unfortunately, the position has been closed."
+        def close(self): pass
+    monkeypatch.setattr(inbox, "Box", FakeBox)
+    monkeypatch.setattr(inbox, "_search", lambda conn, days: [b"9"])
+    monkeypatch.setattr(inbox, "_headers", lambda conn, uids: spoof)
+    monkeypatch.setattr(inbox, "credentials", lambda: ("me@example.com", "pw"))
+    monkeypatch.setattr(inbox, "_notify", lambda found: None)
+    assert inbox.check(days=2)["updates"] == [] and tracker.application(2)["stages"] == []

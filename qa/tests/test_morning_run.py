@@ -204,3 +204,19 @@ def test_no_catch_up_when_today_ran_it_runs_or_6am_is_switched_off(controls):
     client.post("/run/morning/auto", json={"on": True})
     (data / "daily.lock").mkdir()
     assert not morning_pages.missed_morning(morning)
+
+
+def test_another_site_cannot_press_the_apps_buttons(controls):
+    _, client = controls
+    for headers in ({"Sec-Fetch-Site": "cross-site", "Origin": "https://attacker.example"},
+                    {"Origin": "https://attacker.example"}, {"Origin": "null"}, {"Sec-Fetch-Site": "same-site"}):
+        reply = client.post("/run/morning/auto", data="on=false", headers=headers)
+        assert reply.status_code == 403, headers
+    assert not morning_pages.AUTO_OFF.exists()                       # the 6 AM start left as it was
+    # This app's own pages, and tools on this Mac (no browser headers), still can.
+    assert client.post("/run/morning/auto", json={"on": True},
+                       headers={"Sec-Fetch-Site": "same-origin", "Origin": "http://localhost:8770"}).status_code == 200
+    assert client.post("/run/morning/auto", json={"on": True}).status_code == 200
+    # A site re-pointing its own name at this Mac reads nothing either.
+    assert client.get("/run/morning", headers={"Host": "attacker.example:8770"}).status_code == 403
+    assert client.get("/run/morning", headers={"Host": "127.0.0.1:8770"}).status_code == 200

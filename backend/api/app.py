@@ -42,6 +42,30 @@ app = Flask(__name__, template_folder=str(PROJECT_ROOT / "frontend" / "templates
             static_folder=str(PROJECT_ROOT / "frontend" / "static"))
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
+@app.before_request
+def _this_mac_only():
+    """Only this app's own pages press its buttons. Any web page open in the same browser could
+    otherwise send a form to localhost:8770 -- stop the morning run, switch off its 6 AM start,
+    record an application -- since nothing here asks who is pressing. A change from another
+    site (the browser says so in Sec-Fetch-Site and Origin) is refused, and so is a request under
+    any name but this Mac's, which is how a site re-pointing its own name at 127.0.0.1 would read
+    pages. Tools on this Mac (curl, scripts, tests) send neither header and are let through."""
+    from urllib.parse import urlparse
+    if request.host.rsplit(":", 1)[0].strip("[]") not in LOCAL_HOSTS:
+        return jsonify(ok=False, error="This app answers on localhost only."), 403
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return None
+    site = request.headers.get("Sec-Fetch-Site")
+    origin = request.headers.get("Origin")
+    if (site and site not in ("same-origin", "none")) or \
+            (origin is not None and (urlparse(origin).hostname or "") not in LOCAL_HOSTS):
+        return jsonify(ok=False, error="Refused: that came from another site, not this app's pages."), 403
+    return None
+
+
 _cfg = None
 
 

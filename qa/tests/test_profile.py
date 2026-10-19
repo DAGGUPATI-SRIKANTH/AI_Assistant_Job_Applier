@@ -280,3 +280,19 @@ def test_a_bare_city_and_state_is_not_dropped():
     # Exclusion still does the real work — that list is the one that was tuned.
     assert at("Bengaluru, India") is not None
     assert at("Remote - India") is not None
+
+
+def test_a_start_date_follows_the_notice_period_on_the_day_of_the_form():
+    from datetime import date
+    from backend.apply.profile import start_after
+    assert start_after("2 weeks", today=date(2026, 10, 17)) == "10/31/2026"
+    assert start_after("30 days", today=date(2026, 10, 17)) == "11/16/2026"
+    assert start_after("Immediately") is None and start_after(None) is None
+
+
+def test_one_form_answers_are_not_learned():
+    from backend.apply.answers import learnable
+    assert not learnable("Date", "10/15/2026")
+    assert not learnable("What full time job(s) are you applying for?", "Staff Infrastructure Engineer")
+    assert not learnable("When can you start a new role?", "11/02/2026")
+    assert learnable("Are you able to work from our US office three days per week?", "Yes")

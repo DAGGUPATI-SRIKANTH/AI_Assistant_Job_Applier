@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,9 +51,31 @@ class Outcome:
     job_id: int
     company: str
     title: str
-    result: str          # submitted | skipped | timeout | not-filled | stopped
+    result: str          # submitted | skipped | timeout | not-filled | stopped | handoff
     how: str = ""        # auto | you
     detail: str = ""
+    handoff: str = ""    # the form to open in the person's own browser, once the app's is closed
+
+
+# Boards whose CAPTCHA turns the app's own browser away at Submit even when the person presses it
+# (Lever's hCaptcha: "There was an error verifying your application"). The app fills the form to
+# learn what it asks, then hands it over: the person sends it from their own browser.
+HANDOFF = (re.compile(r"^https://jobs\.(?:eu\.)?lever\.co/", re.I),)
+
+
+def hands_off(url: str) -> bool:
+    return any(p.match(url or "") for p in HANDOFF)
+
+
+def open_own_browser(url: str) -> bool:
+    """The person's own Chrome -- their profile, their sign-ins -- not the app's; else their browser."""
+    for args in (["open", "-a", "Google Chrome", url], ["open", url]):
+        try:
+            if subprocess.run(args, capture_output=True, timeout=20).returncode == 0:
+                return True
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return False
 
 
 def say(line: str) -> None:
@@ -143,23 +167,90 @@ def selected_master(cfg, job) -> Path | None:
 
 
 def choose_resume(cfg, job, *, tailor: bool = True) -> tuple[Path | None, str]:
-    """(file to attach, where it came from)."""
-    found = tailored_resume(cfg, job)
+    """(file to attach, where it came from).
+
+    A tailored resume set to be made again (one made from a master since repaired) is never
+    sent as it is: it is tailored again first, or the person's own lines go instead."""
+    from ml.tailoring.pipeline import needs_redo
+    redo = needs_redo(job.id)
+    found = None if redo else tailored_resume(cfg, job)
     if found:
         return found, "tailored"
     note = "tailoring off"
     if tailor:
         try:
-            from ml.resume.pipeline import tailor_jobs
-            outcomes = tailor_jobs(cfg, [job.id])
-            status = outcomes[0].status if outcomes else "not tailored"
-            found = tailored_resume(cfg, job)
+            if redo:
+                say(f"Tailoring the resume again first: the one made for this job was {redo} "
+                    "(about 8 minutes)…")
+                from backend.apply.prepare import _tailor
+                _tailor(cfg, job, again=True)
+                status = "did not replace the old one"
+            else:
+                from ml.resume.pipeline import tailor_jobs
+                outcomes = tailor_jobs(cfg, [job.id])
+                status = outcomes[0].status if outcomes else "not tailored"
+            found = None if needs_redo(job.id) else tailored_resume(cfg, job)
             if found:
                 return found, "tailored just now"
             note = f"tailoring {status}"
         except Exception as exc:              # no model running, no key, ...
             note = f"tailoring unavailable ({type(exc).__name__})"
     return selected_master(cfg, job), f"your resume selected for this job — {note}"
+
+
+def file_name(applicant, company: str, kind: str, suffix: str) -> str:
+    """The name an employer sees: "Jordan_Example_Resume_Acme.pdf" -- the person, what it is, for whom.
+
+    The company keeps its own capitals and drops "Inc."/"LLC"; anything that is not a letter or a
+    digit becomes one underscore, so the name survives every upload form.
+    """
+    from ml.resume.packet import file_name as named   # one rule for the job's folder and the upload
+    return named(getattr(applicant, "full_name", ""), company, kind, suffix)
+
+
+def sent_copy(path: Path, evidence: Path, applicant, company: str, kind: str) -> Path:
+    """A copy of `path` named for the employer, in the run's send/ folder."""
+    folder = evidence / "send"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / file_name(applicant, company, kind, Path(path).suffix)
+    shutil.copy2(path, target)
+    return target
+
+
+def write_letter_if_missing(cfg, job, head: str = "") -> bool:
+    """Auto-apply does every step of the job page's checklist: a cover letter is written for a job
+    that has none -- the same writer and honesty check as the page's "let Claude write it" -- so
+    a form that asks for one gets one. Returns whether the job has a letter now.
+
+    A letter the check rejects, or a model that does not answer, leaves the application to go on
+    without one: the job keeps its status (the page's writer would mark it Manual Review).
+    """
+    from ml.resume.packet import LETTER_FILE, packet_dir
+    folder = packet_dir(cfg, job.company, job.title, job.external_id or "", job_id=job.id)
+    if (folder / LETTER_FILE).exists():
+        return True
+    if cfg is not None and not cfg.get("apply.write_letter", True):
+        return False
+    from ml.resume.pipeline import write_letter
+    say(f"{head}: writing the cover letter (a minute)…" if head else "Writing the cover letter…")
+    with get_session() as session:
+        status_before = session.get(Job, job.id).status
+    try:
+        outcome = write_letter(cfg, job.id)
+        written = outcome.status not in ("rejected", "error") and (folder / LETTER_FILE).exists()
+    except Exception as exc:                      # no letter is better than no application
+        log.warning("Cover letter for job %s not written: %s", job.id, exc)
+        written = False
+    if not written:
+        with get_session() as session:
+            row = session.get(Job, job.id)
+            if row is not None and row.status != status_before:
+                row.status = status_before           # a failed letter is not a verdict on the job
+        say("   No cover letter this time: the draft did not pass the honesty check, or no model answered. "
+            "The application goes on without one; the job page can write one.")
+    else:
+        say("   Cover letter written and checked.")
+    return written
 
 
 def cover_letter(cfg, job, evidence: Path) -> Path | None:
@@ -189,10 +280,14 @@ def cover_letter(cfg, job, evidence: Path) -> Path | None:
 
 # -- recording ------------------------------------------------------------
 
-def record_application(job_id: int, entry: dict, *, audit_log: Path | None = None) -> None:
-    """Mark the job Applied and keep a line saying exactly what went out."""
+def record_application(job_id: int, entry: dict, *, audit_log: Path | None = None,
+                       at: datetime | None = None) -> None:
+    """Mark the job Applied and keep a line saying exactly what went out.
+
+    `at` is when it went, when that is known better than "now": an employer's
+    "thank you for applying" email carries the moment of the submission."""
     audit_log = audit_log or AUDIT_LOG          # read at call time, not import
-    now = datetime.now(timezone.utc)
+    now = at or datetime.now(timezone.utc)
     with get_session() as session:
         job = session.get(Job, job_id)
         if job is not None:
@@ -356,10 +451,16 @@ def run(cfg, *, limit: int = 10, job_id: int | None = None, tailor: bool = True,
         if manager is not None:
             manager.stop()
 
+    # Only now, with the app's window gone: a URL sent to Chrome while it was open could land in it.
+    handed = [o for o in outcomes if o.handoff]
+    for o in handed:
+        if not open_own_browser(o.handoff):
+            say(f"   Open {o.handoff} in your own browser to send {o.company}'s form.")
     sent = [o for o in outcomes if o.result == "submitted"]
     say(f"Done: {len(sent)} submitted, "
         f"{sum(o.result == 'skipped' for o in outcomes)} skipped, "
-        f"{sum(o.result in ('timeout', 'not-filled') for o in outcomes)} not sent.")
+        f"{sum(o.result in ('timeout', 'not-filled') for o in outcomes)} not sent"
+        + (f", {len(handed)} to send from your own browser" if handed else "") + ".")
     return outcomes
 
 
@@ -373,9 +474,20 @@ def apply_one(cfg, page, job, applicant: Applicant, head: str, *,
         say(f"{head}: no resume to attach — put yours in ml/resume/. Skipped.")
         outcome.detail = "no resume"
         return outcome
-    kept = evidence / f"resume{resume.suffix}"
-    shutil.copy2(resume, kept)                 # exactly what went out
+    shutil.copy2(resume, evidence / f"resume{resume.suffix}")    # exactly what went out, for the app's pages
+    # What the employer receives is named for the person and the company, never "resume.pdf".
+    kept = sent_copy(resume, evidence, applicant, job.company, "Resume")
+    try:
+        # The job page's checklist reads the folder: without it, a run that tailored
+        # the resume still showed "0 of 4 done" and the letter step stayed locked.
+        from ml.resume.packet import build_packet
+        build_packet(cfg, job)
+    except Exception as exc:                   # a folder problem never stops the application
+        log.warning("No application folder for job %s: %s", job.id, exc)
+    write_letter_if_missing(cfg, job, head)
     letter = cover_letter(cfg, job, evidence)
+    if letter is not None:
+        letter = sent_copy(letter, evidence, applicant, job.company, "Cover_Letter")
 
     if job.source == "workday":
         return _apply_workday(cfg, page, job, applicant, head, outcome, kept, letter,
@@ -490,6 +602,8 @@ def _apply_anywhere(cfg, page, job, applicant, head, outcome, kept, letter, resu
     elif reached.kind == "unknown":
         say("   The application form isn't on this page. Open it in the window (its Apply button), "
             "and the app fills it when it shows.")
+    elif hands_off(reached.url):
+        return _hand_off(job, reached.url, result, head, outcome, kept, letter, resume_note, evidence)
     else:
         say(f"{head}: {result.summary()} · on {reached.url.split('?')[0][:90]}")
         if result.captcha:
@@ -514,6 +628,24 @@ def _apply_anywhere(cfg, page, job, applicant, head, outcome, kept, letter, resu
             "cover_letter": str(letter) if letter else None, "filled": result.filled,
             "evidence": str(evidence)})
     _settle(outcome, job, verdict, "you", reached.url, kept, resume_note, letter, result, evidence, answers)
+    return outcome
+
+
+def _hand_off(job, url, result, head, outcome, kept, letter, resume_note, evidence) -> Outcome:
+    """A form whose CAPTCHA turns the app away: what it asks, answered, for the person's own browser.
+    The job page lists each answer with a Copy button and the files to attach, and asks whether it
+    went -- "Yes" records the application as the app would have."""
+    from backend.apply import anyform
+    anyform.keep_unconfirmed(job.id, {
+        "company": job.company, "title": job.title, "url": url, "how": "you", "handoff": True,
+        "resume": str(kept), "resume_source": resume_note, "cover_letter": str(letter) if letter else None,
+        "filled": result.filled, "left": list(result.required_blank) + list(result.declarations),
+        "evidence": str(evidence)})
+    say(f"{head}: {result.summary()}")
+    say("   This site's CAPTCHA turns away the app's own browser even when you press Submit, so this one "
+        "goes from yours: the form opens in your own Chrome when this window closes. The job page lists "
+        "every answer with a Copy button and the files to attach; say there once it's sent.")
+    outcome.result, outcome.how, outcome.handoff = "handoff", "you", url
     return outcome
 
 
@@ -545,12 +677,25 @@ def _settle(outcome, job, verdict, how, url, kept, resume_note, letter, result, 
             answers) -> None:
     """Record and report how one application ended."""
     outcome.result, outcome.how = verdict, how
+    # Your written answers ("Describe the deepest AWS estate you have owned…") for the next forms that
+    # ask something like them (backend/apply/written.py), whatever became of this one: the last reading of
+    # the form, which is what you sent -- or, on a form the app sent itself, what the app typed into it
+    # (the answers you gave for this job on the Apply page among them).
+    source = answers or (result.filled if verdict == "submitted" else None)
+    if source:
+        from backend.apply import written
+        kept_written = written.keep_from(source, job.company, job.title, job.id)
+        if kept_written:
+            say(f"   Kept {len(kept_written)} written answer(s) of yours for similar questions later.")
     if verdict == "submitted":
+        # The form as it went: your final answers -- what you typed or changed on it -- over what the
+        # app typed. Only the app's own fields were kept, and a whole set of answers had to be pasted in.
+        final = {**(result.filled or {}), **(answers or {})}
         record_application(job.id, {
             "company": job.company, "title": job.title, "url": url, "how": how,
             "resume": str(kept), "resume_source": resume_note,
             "cover_letter": str(letter) if letter else None,
-            "filled": result.filled, "evidence": str(evidence),
+            "filled": final, "filled_by_app": result.filled, "evidence": str(evidence),
         })
         say(f"   Applied ✓ ({'sent automatically' if how == 'auto' else 'you submitted'})")
         if answers:

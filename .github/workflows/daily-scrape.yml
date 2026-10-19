@@ -24,11 +24,14 @@ name: Daily scrape
 
 on:
   schedule:
-    # 11:00 UTC = 06:00 America/Chicago (CDT). GitHub runs cron in UTC only and
-    # does not follow daylight saving, so this drifts to 05:00 local in winter.
+    # 06:17 UTC = 01:17 America/Chicago (00:17 in winter: cron is UTC only). Early
+    # on purpose: GitHub started the 11:17 schedule three to four hours late every
+    # day in October 2026 (09:13-10:23 local), and the postings are wanted by the
+    # time the laptop opens. The Mac takes them, waits for a run under way, or
+    # reads the boards itself when there is none (devops/cloud_results.py).
     # Minute 17 on purpose: every scheduled job in the world asks for :00, the
     # queue is deepest there, and a job that has to wait is a job that runs late.
-    - cron: "17 11 * * *"
+    - cron: "17 6 * * *"
   workflow_dispatch:          # and whenever you press the button
 
 concurrency:
@@ -81,6 +84,28 @@ jobs:
           printf '%s' "$SEARCH_PROFILE" > backend/config/search_profile.yaml
           echo "Search profile written ($(wc -l < backend/config/search_profile.yaml) lines)."
 
+      - name: Unlock the full board list
+        # The full list is not in this public repository: the Mac sends it as an
+        # encrypted release asset whenever it changes (devops/cloud_results.py
+        # push-boards), locked with the same passphrase as the results. Without
+        # it, or the passphrase, the older list in backend/config/boards.csv is
+        # read instead. Counts only in the log, which is public.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PASSPHRASE: ${{ secrets.RESULTS_PASSPHRASE }}
+        run: |
+          if [ -n "$PASSPHRASE" ] && gh release download cloud-boards --pattern boards.csv.enc --dir "$RUNNER_TEMP" 2>/dev/null; then
+            if openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -md sha256 -in "$RUNNER_TEMP/boards.csv.enc" \
+                 -out "$RUNNER_TEMP/boards.csv" -pass env:PASSPHRASE 2>/dev/null; then
+              mv "$RUNNER_TEMP/boards.csv" backend/config/boards.csv
+              echo "Full board list unlocked: $(( $(wc -l < backend/config/boards.csv) - 1 )) boards."
+            else
+              echo "::warning::The board list could not be unlocked; reading the repository's older list."
+            fi
+          else
+            echo "::warning::No encrypted board list; reading the repository's older list."
+          fi
+
       - name: Seed the board list
         # The boards live in data/jobs.db, which is gitignored, so a runner
         # with a cold cache starts with nothing to scrape -- the first cloud
@@ -116,7 +141,7 @@ jobs:
             echo "The scrape still ran and the cache is updated; only collection is off."
             exit 0
           fi
-          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -md sha256 -salt \
             -in data/jobs.db -out jobs.db.enc -pass env:PASSPHRASE
           ls -lh jobs.db.enc
 

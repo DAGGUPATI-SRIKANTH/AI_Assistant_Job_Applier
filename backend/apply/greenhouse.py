@@ -361,7 +361,7 @@ def fill(page, job_id: int, url: str, applicant: Applicant,
                     from backend.apply.salary import single_figure
                     answer = single_figure(answer) or answer
                 element.fill(answer)
-            result.filled[label[:60]] = answer
+            result.filled[label[:300]] = answer   # whole: the Applied page shows the question
         except Exception as exc:
             log.debug("Greenhouse %s: %r could not be filled: %s", job_id, label, exc)
 
@@ -475,10 +475,16 @@ _SNAPSHOT_JS = """() => {
   const out = {};
   for (const label of document.querySelectorAll('label[for]')) {
     const el = document.getElementById(label.getAttribute('for'));
-    const text = (label.innerText || '').trim();
+    // The question as the form asks it, without its "required" star.
+    const text = (label.innerText || '').trim().replace(/\\s*\\*+\\s*$/, '');
     if (!el || !text || el.type === 'file') continue;
     let value = '';
-    if (el.getAttribute('role') === 'combobox') {
+    if (el.tagName === 'SELECT') {
+      // What was chosen, as the form shows it -- not the option's hidden code.
+      const picked = el.options[el.selectedIndex];
+      value = picked && picked.value !== '' ? (picked.text || '').trim() : '';
+      if (/^(no answer|select( one)?\\.*|choose\\.*|--+)$/i.test(value)) value = '';
+    } else if (el.getAttribute('role') === 'combobox') {
       const box = el.closest('[class*="control"]') || el.parentElement;
       value = (box ? box.innerText : '').trim();
       if (/^select\\.\\.\\.$/i.test(value)) value = '';

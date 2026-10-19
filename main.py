@@ -836,7 +836,7 @@ def cmd_daily(cfg, args) -> int:
     from backend.config.loader import PROJECT_ROOT
     from backend.core.daily import render_digest, run_daily
 
-    report = run_daily(cfg, skip_scrape=args.no_scrape, since_hours=args.since_hours)
+    report = run_daily(cfg, skip_scrape=args.no_scrape, since_hours=args.since_hours, cloud=args.cloud)
     digest = render_digest(report, cfg, top=args.top)
     print()
     print(digest)
@@ -1136,6 +1136,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_daily.add_argument("--no-scrape", action="store_true",
                          help="Skip scraping; just re-rank and export what is stored")
+    p_daily.add_argument("--cloud", action="store_true",
+                         help="Take today's GitHub fetch when there is one (waiting while it runs); "
+                              "read the boards here when there is none")
     p_daily.add_argument("--since-hours", type=int, default=24,
                          help='What counts as "new" in the digest (default 24)')
     p_daily.add_argument("--top", type=int, default=10, help="New jobs to list in the digest")

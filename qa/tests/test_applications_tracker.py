@@ -85,3 +85,51 @@ def test_the_pages_load(db, monkeypatch):
     assert r["ok"] and r["application"]["current"] == "Heard back"
     assert c.get("/applications/7/file/resume.pdf").status_code == 200
     assert c.get("/applications/999").status_code == 404
+
+
+# -- A position closed: by the employer's word, or the posting taken down -------------------------
+
+def test_a_closed_position_is_recorded_without_calling_it_a_rejection(db):
+    a = tracker.add_stage(7, "closed", datetime.now().date().isoformat(), "Requisition cancelled")
+    assert a["current"] == "Position closed" and a["status"] == "Applied"
+    assert a["follow_up"] is False                    # nothing to chase on a role that is gone
+    assert [x["stage"] for x in tracker.applications()] == ["Position closed"]
+
+
+def test_the_day_the_posting_came_down_is_shown_where_you_are(db):
+    with get_session() as s:
+        job = s.get(Job, 7)
+        job.is_open, job.closed_at = False, datetime(2026, 10, 6, 13, 26, tzinfo=timezone.utc)
+    local = datetime(2026, 10, 6, 13, 26, tzinfo=timezone.utc).astimezone().date().isoformat()
+    assert tracker.application(7)["closed_on"] == local
+    assert tracker.applications()[0]["closed_on"] == local
+    with get_session() as s:
+        s.get(Job, 7).is_open = True                  # back on the board: no longer "taken down"
+    assert tracker.application(7)["closed_on"] is None
+
+
+def test_the_job_page_shows_the_application_and_records_what_happened(db, monkeypatch):
+    import yaml
+    from backend.api import app as webapp
+    from backend.config.loader import DEFAULT_CONFIG_PATH, Config
+    # Set, so cfg() does not swap in the real database; read without load_config(), whose .env would
+    # stay in the environment for every later test.
+    monkeypatch.setattr(webapp, "_cfg", Config(yaml.safe_load(DEFAULT_CONFIG_PATH.read_text()) or {}))
+    with get_session() as s:
+        job = s.get(Job, 7)
+        job.is_open, job.closed_at = False, datetime.now(timezone.utc) - timedelta(days=2)
+        s.add(Job(id=9, source="greenhouse", company="Initech", company_slug="initech", external_id="z",
+                  content_hash="h3", title="Platform Engineer", status="Closed", is_open=False,
+                  closed_at=datetime.now(timezone.utc) - timedelta(days=1), application_url="https://c"))
+    c = webapp.app.test_client()
+    page = c.get("/job/7").get_data(as_text=True)
+    assert 'id="as"' in page and "took this posting down on" in page
+    assert 'id="as-close"' in page and "Position closed" in page          # one click, and in the list
+    closed = (datetime.now(timezone.utc) - timedelta(days=2)).astimezone().date().isoformat()
+    assert f'data-on="{closed}"' in page
+    r = c.post("/applications/7/stage", json={"stage": "closed", "on": closed}).get_json()
+    assert r["ok"] and r["application"]["current"] == "Position closed"
+    again = c.get("/job/7").get_data(as_text=True)
+    assert 'id="as-close"' not in again and "you have marked the application closed" in again
+    never = c.get("/job/9").get_data(as_text=True)
+    assert "This posting closed on" in never and 'id="as"' not in never

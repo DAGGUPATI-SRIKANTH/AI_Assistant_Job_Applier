@@ -10,7 +10,7 @@
     <div class="row" style="margin-top:8px">
       {% if a.posting_url %}<a class="btn" href="{{ a.posting_url }}" target="_blank" rel="noopener">The posting ↗</a>{% endif %}
       <a class="btn" href="{{ url_for('job_detail', job_id=a.job_id) }}">Job page</a>
-      {% if not a.open %}<span class="pill muted">the posting has closed</span>{% endif %}
+      {% if not a.open %}<span class="pill muted">the posting was taken down{% if a.closed_on %} {{ a.closed_on }}{% endif %}</span>{% endif %}
     </div>
   </div>
   <div class="ap-now">
@@ -25,7 +25,8 @@
     <h2 class="sk-h">Stages</h2>
     <ol class="ap-line" id="line"></ol>
     <div class="t-warn" id="follow" {% if not a.follow_up %}hidden{% endif %}>No reply after {{ a.days }} days. A short, polite
-      follow-up to the recruiter is normal after about {{ follow_up_days }} days, or record “No response”.</div>
+      follow-up to the recruiter is normal after about {{ follow_up_days }} days, or record “No response”{% if a.closed_on %}
+      — or “Position closed”, now the posting is down{% endif %}.</div>
     <h3 class="ap-h3">What happened next?</h3>
     <div class="ap-add">
       <select id="stage" class="chip" aria-label="What happened">
@@ -41,8 +42,10 @@
   <section class="card">
     <h2 class="sk-h">What you sent</h2>
     {% if a.record %}
-      <div class="hint">{% if a.record.how == 'auto' %}Sent by the app{% else %}Filled by the app; you pressed Submit{% endif %}
-        · resume: {{ a.record.resume_source or 'yours' }}{% if a.record.cover_letter %} · with a cover letter{% endif %}</div>
+      <div class="hint">{% if a.record.how == 'email' %}Sent outside the app; the employer's email confirmed it{% if a.record.confirmed_by_email %}:
+        “{{ a.record.confirmed_by_email }}”{% endif %}
+        {% else %}{% if a.record.how == 'auto' %}Sent by the app{% else %}Filled by the app; you pressed Submit{% endif %}
+        · resume: {{ a.record.resume_source or 'yours' }}{% if a.record.cover_letter %} · with a cover letter{% endif %}{% endif %}</div>
       <div class="row" style="margin:8px 0">
         {% for f in a.record.files %}
           {% if f.endswith('.pdf') %}<a class="btn" href="{{ url_for('application_file', job_id=a.job_id, name=f) }}" target="_blank">📄 {{ 'Resume' if f.startswith('resume') else 'Cover letter' }} (PDF)</a>
@@ -55,9 +58,7 @@
       <details class="ap-answers" open><summary>The answers given ({{ a.record.answers|length }})</summary>
         <dl>
         {% for q, v in a.record.answers.items() %}
-          {% if ' ' in q %}
           <dt>{{ q }}</dt><dd>{{ v }}</dd>
-          {% endif %}
         {% endfor %}
         </dl>
       </details>
@@ -85,7 +86,8 @@
 .ap-line li{position:relative;margin:0 0 14px;padding-left:6px}
 .ap-line li::before{content:"";position:absolute;left:-25px;top:4px;width:10px;height:10px;border-radius:50%;background:var(--signal);border:2px solid var(--surface)}
 .ap-line li.applied::before{background:var(--ink-2)}
-.ap-line li.rejected::before,.ap-line li.withdrew::before{background:var(--faint)}
+.ap-line li.rejected::before,.ap-line li.withdrew::before,.ap-line li.closed::before,
+.ap-line li.taken-down::before{background:var(--faint)}
 .ap-line li.offer::before{background:var(--good)}
 .ap-line .when{font-family:var(--mono);font-size:.82em;color:var(--muted)}
 .ap-line .x{border:0;background:none;color:var(--faint);cursor:pointer;margin-left:6px}
@@ -104,10 +106,14 @@ let A = {{ a|tojson }};
 const fmt = iso => iso ? new Date(iso.length === 10 ? iso + 'T12:00' : iso).toLocaleDateString([], {weekday: 'short', month: 'short', day: 'numeric', year: 'numeric'}) : '';
 function draw() {
   const items = [`<li class="applied"><b>Applied</b> <span class="when">${fmt(A.applied_at)}${A.applied_at && A.applied_at.length > 10 ? ' · ' + new Date(A.applied_at).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'}) : ''}</span>
-      <div class="hint">${A.record ? (A.record.how === 'auto' ? 'Sent by the app' : 'Filled by the app; you pressed Submit') : 'Marked Applied by you'}</div></li>`]
-    .concat(A.stages.map((s, i) => `<li class="${esc(s.stage)}"><b>${esc(s.label)}</b> <span class="when">${fmt(s.at)}</span>
+      <div class="hint">${A.record ? (A.record.how === 'auto' ? 'Sent by the app' : A.record.how === 'email' ? 'Sent outside the app; confirmed by the employer’s email' : 'Filled by the app; you pressed Submit') : 'Marked Applied by you'}</div></li>`]
+    .concat(A.stages.map((s, i) => ({at: s.at, html: `<li class="${esc(s.stage)}"><b>${esc(s.label)}</b> <span class="when">${fmt(s.at)}</span>
       <button class="x" data-rm="${i}" title="Remove this stage" aria-label="Remove ${esc(s.label)}">✕</button>
-      ${s.note ? `<div>${esc(s.note)}</div>` : ''}</li>`));
+      ${s.note ? `<div>${esc(s.note)}</div>` : ''}</li>`}))
+      // The posting coming down is the board's news, not a stage of yours: shown in its place, not removable.
+      .concat(A.closed_on ? [{at: A.closed_on + '~', html: `<li class="taken-down"><b>Posting taken down</b> <span class="when">${fmt(A.closed_on)}</span>
+        <div class="hint">The employer removed it from their job board.</div></li>`}] : [])
+      .sort((x, y) => x.at < y.at ? -1 : x.at > y.at ? 1 : 0).map(x => x.html));
   $('line').innerHTML = items.join('');
   $('now').textContent = A.current;
   $('follow').hidden = !A.follow_up;
@@ -118,7 +124,10 @@ function draw() {
     if (r.ok) { A = r.application; draw(); } else $('say').textContent = r.error;
   });
 }
-$('on').value = new Date().toISOString().slice(0, 10);
+// Today where you are: toISOString() is UTC, a day ahead every evening, and the day was refused as
+// "in the future".
+const today = new Date(); today.setMinutes(today.getMinutes() - today.getTimezoneOffset());
+$('on').value = today.toISOString().slice(0, 10);
 $('on').max = $('on').value;
 $('add').onclick = async () => {
   $('add').disabled = true;

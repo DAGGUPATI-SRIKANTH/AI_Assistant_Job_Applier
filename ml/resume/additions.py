@@ -69,6 +69,19 @@ def roles(resume) -> list[str]:
     return found
 
 
+def mentions(line: str, tool: str) -> bool:
+    """Does the line name the tool? A one-word tool as written; a kind of work by its words in any
+    order -- "a fleet of Linux servers" mentions "linux fleet", plurals included."""
+    low = line.lower()
+    if tool.lower() in low:
+        return True
+    words = set(re.findall(r"[\w+#./-]+", low))
+    stem = lambda w: w[:-1] if len(w) > 3 and w.endswith("s") else w
+    have = words | {stem(w) for w in words}
+    needed = re.findall(r"[\w+#./-]+", tool.lower())
+    return len(needed) > 1 and all(w in have or stem(w) in have for w in needed)
+
+
 def add(resume, role: str, line: str, tool: str, confirmed: bool,
         path: Path | None = None) -> dict:
     """Keep one line of the person's own experience. Raises NotAdded if it cannot be."""
@@ -76,13 +89,18 @@ def add(resume, role: str, line: str, tool: str, confirmed: bool,
     tool = (tool or "").strip()
     if not confirmed:
         raise NotAdded("Tick that you have used this in real work — the resume is a statement of fact.")
-    if role not in roles(resume):
+    # A browser sends a dropdown's text with its spacing collapsed: the resume's
+    # "USA  \tFeb 2025" arrives as "USA Feb 2025". Match on the words, keep the resume's own line.
+    plain = lambda text: re.sub(r"\s+", " ", text or "").strip()
+    matched = next((r for r in roles(resume) if plain(r) == plain(role)), None)
+    if matched is None:
         raise NotAdded("Pick one of the jobs on your resume.")
+    role = matched
     if len(line.split()) < 5:
         raise NotAdded("Write a full line about what you did — at least a few words.")
     if len(line) > MAX_LINE:
         raise NotAdded(f"Keep it to one line (under {MAX_LINE} characters).")
-    if tool and tool.lower() not in line.lower():
+    if tool and not mentions(line, tool):
         raise NotAdded(f"Mention {tool} in the line, so it is clear where you used it.")
     if not line.endswith((".", "!", "?")):
         line += "."

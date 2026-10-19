@@ -22,7 +22,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from flask import Flask, jsonify, redirect, render_template, request, send_file, url_for
@@ -99,7 +99,7 @@ def job_row(job: Job) -> dict:
         "score": (None if job.ats_match_score is None
                   else round(job.ats_match_score * 100)),
         # A score measured against a title alone is not on the same scale as
-        # one measured against a full posting. Zoom scoring 23% never meant it
+        # one measured against a full posting. A job scoring 23% never meant it
         # was a weak match; it meant there were 217 characters to judge it by
         # instead of 6,758. The page has to show the difference or the number
         # misleads in the one direction that matters: burying a good job.
@@ -195,10 +195,17 @@ def index():
         applied = session.query(Job).filter(Job.status.in_(("Applied", "Interviewing", "Offer", "Rejected"))).count()
         interviewing = session.query(Job).filter(Job.status.in_(("Interviewing", "Offer"))).count()
 
+    from backend.core import watchlist
+    watched, starred = watchlist.watched_keys(), watchlist.starred_ids()
+    for r in rows:
+        r["starred"] = r["id"] in starred
+        r["watched"] = bool(watched) and watchlist.company_key(r["company"]) in watched
+    watch_new = sum(c["new"] for c in watchlist.companies_view()) if watched else 0
+
     resume = current_resume()
     return render_template(
         "index.html",
-        rows=rows,
+        rows=rows, watch_new=watch_new,
         statuses=STATUS_VALUES,
         resume=resume_label(),
         resume_dir=str(resume_dir()),
@@ -405,6 +412,12 @@ def last_run_stats() -> dict:
                 .scalar() or 0
             )
 
+    if finished_at is not None:
+        from datetime import timezone
+        # Stored in UTC. Shown as stored, the last scrape read "18 Oct, 18:09" at 14:53 that day.
+        if finished_at.tzinfo is None:
+            finished_at = finished_at.replace(tzinfo=timezone.utc)
+        finished_at = finished_at.astimezone()
     return {
         "boards": boards,
         "by_source": by_source,
@@ -521,6 +534,12 @@ def job_detail(job_id: int):
         description = job.description or ""
         requirements = job.requirements or ""
         template_pick = _template_for(job)
+        from backend.apply import tracker
+        closed = tracker.closed_on(job)
+        applied = job.status in tracker.APPLIED_STATUSES or job.applied_at is not None
+    # An application's page in brief on its job's page: where it stands, the posting taken down,
+    # and what happened next recorded here too.
+    application = tracker.application(job_id) if applied else None
     # Many boards give no separate requirements, and the field holds the
     # whole posting again: shown twice, the page opened on a wall of text.
     if " ".join(requirements.split()) == " ".join((description or "").split()):
@@ -551,7 +570,29 @@ def job_detail(job_id: int):
         statuses=STATUS_VALUES, packet=packet, docs=docs,
         api_ready=api_ready, api_model=writer["model"], writer=writer,
         templates=_template_choices(), template_pick=template_pick,
+        starred=job_id in _starred(),
+        application=application, stages=tracker.STAGES,
+        closed_text=_day_text(closed), redo=_redo_reason(job_id),
     )
+
+
+def _redo_reason(job_id: int) -> str | None:
+    """Why this job's tailored resume is to be made again before it is sent, if it is."""
+    from ml.tailoring.pipeline import needs_redo
+    return needs_redo(job_id)
+
+
+def _day_text(day: str | None) -> str:
+    """"14 Oct" for a day this year, "14 Oct 2025" for another; "" for none."""
+    if not day:
+        return ""
+    when = date.fromisoformat(day)
+    return f"{when.day} {when:%b}" + ("" if when.year == date.today().year else f" {when.year}")
+
+
+def _starred() -> set[int]:
+    from backend.core.watchlist import starred_ids
+    return starred_ids()
 
 
 def _template_for(job) -> tuple[str, str]:
@@ -1220,7 +1261,7 @@ def job_documents(job_id: int) -> dict[str, Path | None]:
     Paths come from the job's own record, never from the request, so the file
     route below cannot be pointed at anything else on the disk.
     """
-    from ml.resume.packet import LETTER_FILE, RESUME_FILE, packet_dir, packet_root
+    from ml.resume.packet import LETTER_FILE, RESUME_FILE, packet_dir, packet_root, resume_in
     from ml.resume.writer import output_filename
 
     found = {"resume_pdf": None, "resume_docx": None, "letter": None}
@@ -1234,7 +1275,7 @@ def job_documents(job_id: int) -> dict[str, Path | None]:
     folder = packet_dir(config, company, title, external, job_id=job_id)
     for key, candidates in (
         ("resume_pdf", [flat.with_suffix(".pdf")]),
-        ("resume_docx", [flat, folder / RESUME_FILE]),
+        ("resume_docx", [flat, resume_in(folder) or folder / RESUME_FILE]),
         ("letter", [folder / LETTER_FILE]),
     ):
         found[key] = next((p for p in candidates if p.exists()), None)
@@ -1258,13 +1299,48 @@ def resume_add():
     from ml.resume.additions import NotAdded, add
     from ml.resume.pipeline import load_base_resume
     data = request.get_json(silent=True) or {}
+    # One job or several: a line of its own under each job ticked ("items"), or one line under all.
+    items = [i for i in (data.get("items") or []) if isinstance(i, dict)]
+    if items:
+        pairs = [(str(i.get("role") or ""), str(i.get("line") or "")) for i in items]
+    else:
+        roles = [str(r) for r in (data.get("roles") or [data.get("role") or ""]) if str(r).strip()] or [""]
+        pairs = [(role, str(data.get("line") or "")) for role in roles]
+    resume = load_base_resume(cfg())
+    added, refused = [], []
+    for role, line in pairs:
+        try:
+            entry = add(resume, role, line, str(data.get("tool") or ""), bool(data.get("confirmed")))
+            added.append(entry["role"].split("  ")[0].split("\t")[0])
+        except NotAdded as exc:
+            refused.append(str(exc))
+    if not added:
+        return jsonify(ok=False, error=refused[0] if refused else "Pick one of the jobs on your resume."), 400
+    said = (f"Added under {added[0]}" if len(added) == 1 else f"Added under {len(added)} jobs: " + "; ".join(added))
+    if refused:
+        said += f" ({len(refused)} skipped: {refused[0]})"
+    return jsonify(ok=True, said=said + ". Every resume from now on can use it — press Re-tailor to use it for this job.")
+
+
+@app.post("/job/<int:job_id>/used/draft")
+def job_used_draft(job_id: int):
+    """"I've used this": a line for each job ticked, written from the person's own lines at that
+    job and framed by what this posting asks -- for them to check, never added by itself."""
+    from ml.resume.suggest import draft_used
+    data = request.get_json(silent=True) or {}
+    skill = str(data.get("tool") or "").strip()
+    roles = [str(r) for r in (data.get("roles") or []) if str(r).strip()]
+    if not skill or not roles:
+        return jsonify(ok=False, error="Pick one of your jobs first."), 400
+    with get_session() as session:
+        job = session.get(Job, job_id)
+        if job is None:
+            return jsonify(ok=False, error="No such job."), 404
+        session.expunge(job)
     try:
-        entry = add(load_base_resume(cfg()), str(data.get("role") or ""), str(data.get("line") or ""),
-                    str(data.get("tool") or ""), bool(data.get("confirmed")))
-    except NotAdded as exc:
-        return jsonify(ok=False, error=str(exc)), 400
-    return jsonify(ok=True, said=f"Added under {entry['role'].split('  ')[0]}. Every resume from now on "
-                                 f"can use it — press Rewrite again to use it for this job.")
+        return jsonify(ok=True, lines=draft_used(cfg(), job, skill, roles, again=bool(data.get("again"))))
+    except Exception as exc:
+        return jsonify(ok=False, error=f"{type(exc).__name__}: {exc}"), 500
 
 
 @app.get("/job/<int:job_id>/ats")
@@ -1290,6 +1366,22 @@ def _teaser_words(job_id: int) -> int | None:
         if job is None or score_basis(job.description) == "full":
             return None
         return len((job.description or "").split())
+
+
+@app.route("/job/<int:job_id>/recheck", methods=["GET", "POST"])
+def job_recheck(job_id: int):
+    """The tailored resume's scores: the last check (GET), or a fresh one from its files (POST)."""
+    from ml.resume import recheck
+    with get_session() as session:
+        job = session.get(Job, job_id)
+        if job is None:
+            return jsonify(ok=False, error="No such job."), 404
+        session.expunge(job)
+    try:
+        found = recheck.run(cfg(), job) if request.method == "POST" else recheck.last(cfg(), job)
+    except Exception as exc:
+        return jsonify(ok=False, error=f"The check could not run: {type(exc).__name__}: {str(exc)[:200]}"), 500
+    return jsonify(ok=True, check=found)
 
 
 @app.post("/job/<int:job_id>/posting")
@@ -2201,9 +2293,22 @@ def _scheduled_run_holding(task: str) -> str | None:
         return None
     for held in ("daily", task):
         lock = PROJECT_ROOT / "data" / f"{held}.lock"
-        if lock.is_dir():
+        if lock.is_dir() and _pipeline_alive(held):
             return held
     return None
+
+
+def _pipeline_alive(task: str) -> bool:
+    """Whether devops/daily_pipeline.sh is running `task` right now.
+
+    A lock left behind by a run that was killed (or stopped from the Jobs page)
+    kept the page at "6 AM fetch running" with nothing running at all."""
+    try:
+        out = subprocess.run(["pgrep", "-f", f"daily_pipeline.sh {task}"], capture_output=True,
+                             text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return True                       # cannot tell: trust the lock, as before
+    return bool(out.split())
 
 
 def _lock_started(task: str) -> str:
@@ -2251,7 +2356,12 @@ def _daily_progress() -> dict:
         return {}
     lines = text[start:].splitlines()
     total = next((int(m.group(1)) for ln in lines if (m := re.search(r"scraping (\d+) companies", ln))), 0)
-    boards = [ln for ln in lines if "data_engineering.scraper.runner" in ln and " seen " in ln]
+    runner = [ln for ln in lines if "data_engineering.scraper.runner" in ln]
+    boards = [ln for ln in runner if " seen " in ln]
+    # A board that fails prints FAILED and never "seen". Counting only "seen" stopped the bar at
+    # 94.5% (1,199 of 21,835 boards failed on 18 Oct) and kept the page at "6 AM fetch running"
+    # for the rest of the day, long after the fetch had finished.
+    failed = [ln for ln in runner if " FAILED " in ln]
 
     def when(line: str):
         try:
@@ -2264,14 +2374,50 @@ def _daily_progress() -> dict:
     stamps = [t for t in (when(ln) for ln in lines) if t]
     last = stamps[-1] if stamps else began
     now = datetime.now()
-    recent = [t for t in (when(ln) for ln in boards[-400:]) if t and t > now - timedelta(minutes=10)]
+    recent = [t for t in (when(ln) for ln in (boards + failed)[-400:]) if t and t > now - timedelta(minutes=10)]
     rate = len(recent) / 600 if len(recent) > 3 else None             # boards a second, lately
-    done = len(boards)
-    fetching = total and done < total * 0.99
+    done = min(len(boards) + len(failed), total) if total else len(boards) + len(failed)
     current = boards[-1].split()[4] if boards and len(boards[-1].split()) > 4 else None
+
+    # Which step the run is on, from the lines each step writes when it starts.
+    def after(marker: str) -> int:
+        return max((i for i, ln in enumerate(lines) if marker in ln), default=-1)
+    waiting = after("waiting for the Mac to be opened") > after("the Mac is open")
+    # The GitHub run's postings taken instead of a fetch here (devops/cloud_results.py).
+    cloud_wait, cloud_in = after("cloud: waiting for today's GitHub fetch"), after("cloud: bringing in today's")
+    cloud_done = max(after(" seen again, "), after("cloud: today's GitHub fetch (run"))
+    cloud_off = max(after("cloud: no GitHub fetch today"), after("cloud: could not reach"),
+                    after("cloud: the GitHub fetch is taking too long"))
+    said = re.search(r"started (\d\d:\d\d)(?:, usually about (\d+) min)?", lines[cloud_wait]) if cloud_wait >= 0 else None
+    prep_at = after("application(s): tailoring")
+    prep_total = next((int(m.group(1)) for m in [re.search(r"Preparing (\d+) application", lines[prep_at])]
+                       if m), 0) if prep_at >= 0 else 0
+    prepared = sum(1 for ln in lines[prep_at + 1:] if ln.startswith(("  ready:", "  skipped "))) if prep_at >= 0 else 0
+    if waiting:
+        stage = "waiting"
+    elif prep_at >= 0:
+        stage = "preparing"
+    elif after("boards scraped") >= 0:
+        stage = "suggesting"              # scrape, score and digest done; skills for the top jobs next
+    elif cloud_done >= 0:
+        stage = "scoring"                 # the GitHub run's postings are in; scoring them now
+    elif cloud_in >= 0 and cloud_in > cloud_off:
+        stage = "cloud-collect"
+    elif cloud_wait >= 0 and cloud_wait > cloud_off:
+        stage = "cloud-wait"
+    elif total and done >= total:
+        stage = "scoring"
+    else:
+        stage = "fetching"
+    fetching = stage == "fetching"
     return {"started": began.strftime("%H:%M"), "done": done, "total": total,
             "percent": round(done / total * 100, 1) if total else None, "current": current,
-            "stage": "fetching" if fetching else "scoring and preparing",
+            "failed": len(failed), "stage": stage,
+            "cloud_started": said.group(1) if said else None,
+            "cloud_usual": int(said.group(2)) if said and said.group(2) else None,
+            "from_cloud": cloud_done >= 0,
+            "started_by": "you" if any("started from the Jobs page" in ln for ln in lines[:6]) else "schedule",
+            "prepared": prepared, "prepare_total": prep_total,
             "eta": int((total - done) / rate) if fetching and rate else None,
             "quiet_for": int((now - last).total_seconds())}
 
@@ -2330,7 +2476,8 @@ def run_status(task: str):
         if task in ("scrape", "daily"):
             # One line per board finished. Counting them is honest progress;
             # a timer would only be guessing.
-            done = sum(1 for ln in lines if "data_engineering.scraper.runner" in ln and " seen " in ln)
+            done = sum(1 for ln in lines if "data_engineering.scraper.runner" in ln
+                       and (" seen " in ln or " FAILED " in ln))      # a failed board is done too
             total = board_count()
             parts = [ln for ln in lines if "data_engineering.scraper.runner" in ln and " seen " in ln]
             if parts:
@@ -2563,7 +2710,14 @@ def tailor_status(run_id):
     if folder is None:
         return jsonify(ok=False, error="No such run."), 404
     try:
-        return jsonify(ok=True, **json.loads((folder / "progress.json").read_text()))
+        state = json.loads((folder / "progress.json").read_text())
+        from ml.tailoring.pipeline import _progress, interrupted
+        if interrupted(folder, state):
+            message = ("This rewrite stopped part-way: the app restarted while it was running. "
+                       "Nothing was saved from it — press the button again to run it afresh.")
+            _progress(folder, done=True, error={"stage": "", "file": None, "message": message})
+            state.update(done=True, error={"stage": "", "file": None, "message": message})
+        return jsonify(ok=True, **state)
     except (OSError, ValueError):
         # A run made without the page (from the command line) has its result and no progress file.
         done = (folder / "result.json").exists()
@@ -2775,3 +2929,7 @@ def health_report():
 from backend.api import resume_pages  # noqa: E402,F401
 from backend.api import tracker_pages  # noqa: E402,F401
 from backend.api import auto_apply  # noqa: E402,F401
+from backend.api import watch_pages  # noqa: E402,F401
+from backend.api import inbox_pages  # noqa: E402,F401
+from backend.api import written_pages  # noqa: E402,F401
+from backend.api import morning_pages  # noqa: E402,F401

@@ -139,6 +139,20 @@ def test_a_later_page_of_the_form_is_filled_when_it_shows(page):
     assert list(again.filled) == ["City"] and again.filled["City"] == "Denver"
 
 
+def test_the_form_picture_is_taken_after_a_late_form_is_filled(page, tmp_path):
+    """Ashby shows its form only after its Apply tab; the kept picture must show it filled, not empty."""
+    page.set_content("<p>About the role</p><div id='slot'></div>")
+    result = anyform.fill(page, 1, "about:blank", person(), None, None, screenshot=False)
+    assert not result.filled and not (tmp_path / "form.png").exists()
+    page.evaluate("""() => setTimeout(() => { document.getElementById('slot').innerHTML =
+        "<form><label for='a'>First name</label><input id='a'><label for='e'>Email</label>"
+        + "<input id='e' type='email'><label for='c'>City</label><input id='c'>"
+        + "<button type='submit'>Submit application</button></form>"; }, 300)""")
+    verdict, _, _ = anyform.watch(page, person(), result, 3, evidence=tmp_path, say=lambda s: None, poll_ms=300)
+    assert verdict == "timeout" and result.filled.get("First name") == "Jordan"
+    assert (tmp_path / "form.png").exists()
+
+
 def test_known_boards_and_their_forms():
     assert anyform.board_of("https://job-boards.greenhouse.io/acme/jobs/123") == "greenhouse"
     assert anyform.board_of("https://acme.wd5.myworkdayjobs.com/en-US/careers/job/x") == "workday"
@@ -188,3 +202,48 @@ def test_did_it_go_is_kept_until_the_person_answers(monkeypatch, tmp_path):
     assert anyform.unconfirmed(5)["company"] == "Example Co"
     anyform.forget_unconfirmed(5)
     assert anyform.unconfirmed(5) is None
+
+
+ASHBY_EEO = """<form>
+<div><label class="q _required_x" for="a1">Are you authorized to work in the country where the job is located?</label>
+  <div class="yesno"><button type="button" aria-pressed="false" onclick="this.setAttribute('aria-pressed','true')">Yes</button>
+  <button type="button" aria-pressed="false" onclick="this.setAttribute('aria-pressed','true')">No</button>
+  <input type="checkbox" tabindex="-1" name="a1" style="display:none"></div></div>
+<div><label class="q _required_x" for="a2">Will you now or in the future require sponsorship for employment visa status in this country?</label>
+  <div class="yesno"><button type="button" aria-pressed="false" onclick="this.setAttribute('aria-pressed','true')">Yes</button>
+  <button type="button" aria-pressed="false" onclick="this.setAttribute('aria-pressed','true')">No</button></div></div>
+<div><label class="q" for="a3">Have you worked here before?</label>
+  <div class="yesno"><button type="button" aria-pressed="true">Yes</button><button type="button" aria-pressed="false">No</button></div></div>
+<fieldset><legend>Hispanic or Latino - A person of Cuban, Mexican, Puerto Rican origin. Asian - A person of the Far East.</legend>
+  <label><input type="radio" name="race" value="h">Hispanic or Latino</label>
+  <label><input type="radio" name="race" value="w">White (Not Hispanic or Latino)</label>
+  <label><input type="radio" name="race" value="b">Black or African American (Not Hispanic or Latino)</label>
+  <label><input type="radio" name="race" value="a">Asian (Not Hispanic or Latino)</label>
+  <label><input type="radio" name="race" value="d">Decline to self-identify</label></fieldset>
+<fieldset><legend>Veteran Status</legend>
+  <label><input type="radio" name="vet" value="1">I identify as one or more of the classifications of protected veteran</label>
+  <label><input type="radio" name="vet" value="2">I am not a veteran</label>
+  <label><input type="radio" name="vet" value="3">I decline to self-identify for protected veteran status</label></fieldset>
+</form>"""
+
+
+def test_yes_no_buttons_and_self_identification_are_answered_from_the_profile(page):
+    page.set_content(ASHBY_EEO)
+    me = person(requires_sponsorship=True)
+    me.demographics = {"race_ethnicity": "White", "veteran_status": "I am not a protected veteran"}
+    result = anyform.fill(page, 1, "about:blank", me, None, None, screenshot=False)
+    pressed = page.evaluate("() => [...document.querySelectorAll('.yesno button')].map(b => b.getAttribute('aria-pressed'))")
+    assert pressed[:4] == ["true", "false", "true", "false"]          # authorized: Yes; sponsorship: Yes
+    assert pressed[4:] == ["true", "false"]                           # already answered by the person: untouched
+    assert page.evaluate("() => document.querySelector('[name=race]:checked').value") == "w"   # White, not Hispanic
+    assert page.evaluate("() => document.querySelector('[name=vet]:checked').value") == "2"    # "I am not a veteran"
+    assert result.filled["Are you authorized to work in the country where the job is located?"] == "Yes"
+
+
+def test_self_identification_answers_match_other_wordings():
+    assert anyform.choose(["I identify as a protected veteran", "I am not a protected veteran", "Decline"],
+                          "I am not a protected veteran") == 1
+    assert anyform.choose(["Yes", "No", "I don't wish to answer"], "I am not a protected veteran") == 1
+    assert anyform.choose(["Yes, I have a disability (or previously had a disability)",
+                           "No, I don't have a disability", "I don't wish to answer"],
+                          "No, I do not have a disability and have not had one in the past") == 1

@@ -9,8 +9,9 @@ words the app does not know, asks the person whether it went.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
-from flask import jsonify, request
+from flask import abort, jsonify, request, send_file
 
 from backend.api.app import PROJECT_ROOT, app, applicant_path, start_task, task_exit_code, task_log, task_pid
 from data_engineering.db.models import Job
@@ -21,6 +22,9 @@ MARKER = PROJECT_ROOT / "data" / "webapp_apply.job"
 APPLY_TASKS = ("apply", "apply-ready")      # one browser profile: one apply run at a time
 APPLIED = ("Applied", "Interviewing", "Offer", "Rejected")
 STARTABLE = ("Not Applied", "Manual Review", "Skipped")
+# What a run keeps that the person checks before saying whether it went.
+RUN_FILES = {"resume.pdf": "application/pdf", "form.png": "image/png",
+             "resume.docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
 
 
 def _marked() -> int | None:
@@ -28,6 +32,13 @@ def _marked() -> int | None:
         return int(MARKER.read_text().strip())
     except (OSError, ValueError):
         return None
+
+
+def _last_run(job_id: int):
+    """This job's newest run folder: the resume it attached and the form as it was left."""
+    from backend.apply.greenhouse import RUNS_DIR
+    runs = sorted(p for p in RUNS_DIR.glob(f"{job_id}-*") if p.is_dir())
+    return runs[-1] if runs else None
 
 
 def _refuse(message: str, code: int = 409):
@@ -91,10 +102,66 @@ def auto_apply_state(job_id: int):
     with get_session() as session:
         job = session.get(Job, job_id)
         status = job.status if job is not None else None
-    ask = (not (running and mine)) and status in STARTABLE and anyform.unconfirmed(job_id) is not None
+    entry = anyform.unconfirmed(job_id)
+    ask = (not (running and mine)) and status in STARTABLE and entry is not None
+    folder = _last_run(job_id)
+    files = [n for n in RUN_FILES if folder is not None and (folder / n).exists()]
     return jsonify(ok=True, running=running and mine, other=running and not mine, lines=lines,
-                   status=status, applied=status in APPLIED, ask=ask,
+                   status=status, applied=status in APPLIED, ask=ask, files=files,
+                   handoff=_handoff(entry) if ask else None,
                    exit=task_exit_code("apply") if mine and not running else None)
+
+
+def _handoff(entry: dict | None) -> dict | None:
+    """A form handed to the person's own browser: every answer, the files, what is left for them."""
+    if not entry or not entry.get("handoff"):
+        return None
+    name = lambda key: Path(entry[key]).name if entry.get(key) else None   # noqa: E731
+    return {"url": entry.get("url"), "resume": name("resume"), "letter": name("cover_letter"),
+            "answers": [{"q": q, "a": a} for q, a in (entry.get("filled") or {}).items()
+                        if isinstance(a, str) and a.strip()],
+            "left": entry.get("left") or []}
+
+
+def _handoff_file(job_id: int, which: str) -> Path | None:
+    """The resume or cover letter a hand-off is to attach -- only from the app's own run folders."""
+    from backend.apply import anyform
+    from backend.apply.greenhouse import RUNS_DIR
+    entry = anyform.unconfirmed(job_id) or {}
+    raw = entry.get({"resume": "resume", "letter": "cover_letter"}.get(which, ""))
+    if not entry.get("handoff") or not raw:
+        return None
+    path = Path(raw).resolve()
+    return path if RUNS_DIR.resolve() in path.parents and path.is_file() else None
+
+
+@app.get("/job/<int:job_id>/auto-apply/handoff/<which>")
+def auto_apply_handoff_file(job_id: int, which: str):
+    """The file to attach in the person's own browser, under the name the employer should see."""
+    path = _handoff_file(job_id, which)
+    if path is None:
+        abort(404)
+    return send_file(path, as_attachment=True, download_name=path.name)
+
+
+@app.post("/job/<int:job_id>/auto-apply/handoff/<which>/reveal")
+def auto_apply_handoff_reveal(job_id: int, which: str):
+    """Show the file in Finder, to drag onto the form."""
+    import subprocess
+    path = _handoff_file(job_id, which)
+    if path is None:
+        return _refuse("That file is not there any more.", 404)
+    subprocess.run(["open", "-R", str(path)], capture_output=True, timeout=20)
+    return jsonify(ok=True)
+
+
+@app.get("/job/<int:job_id>/auto-apply/file/<name>")
+def auto_apply_file(job_id: int, name: str):
+    """The resume the last run attached, or its picture of the form -- only from that run's folder."""
+    folder = _last_run(job_id)
+    if name not in RUN_FILES or folder is None or not (folder / name).exists():
+        abort(404)
+    return send_file(folder / name, mimetype=RUN_FILES[name], as_attachment=name.endswith(".docx"))
 
 
 @app.post("/job/<int:job_id>/auto-apply/went")

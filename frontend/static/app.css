@@ -354,6 +354,12 @@ a.btn{text-decoration:none;display:inline-flex;align-items:center;gap:6px}
 .used-form{margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);display:flex;flex-direction:column;gap:8px}
 .used-form select,.used-form textarea{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink)}
 .used-check{display:flex;gap:6px;align-items:flex-start}
+.used-lines{display:flex;flex-direction:column;gap:8px}
+.used-lines:empty{display:none}
+.used-line{display:flex;flex-direction:column;gap:3px}
+.used-line textarea{width:100%;box-sizing:border-box;resize:vertical}
+.used-line textarea:disabled{color:var(--muted);background:var(--sunk,var(--surface))}
+.used-under{display:flex;justify-content:space-between;align-items:baseline;gap:10px;font-size:.88em;color:var(--muted)}
 .hint.good{color:var(--good)} .hint.bad{color:var(--crit)}
 
 /* -- Resume Tailoring ---------------------------------------------------------- */

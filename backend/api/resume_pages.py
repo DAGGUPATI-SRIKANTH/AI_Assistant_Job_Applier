@@ -339,9 +339,9 @@ def _letter_job(job_id: int) -> dict | None:
 def _letter_resume(info: dict) -> str:
     """The resume that goes with this letter: the job's tailored copy, else the master."""
     from ml.tailoring.reader import read_document
-    for name in ("resume.docx", "resume.pdf"):
-        path = info["folder"] / name
-        if path.exists():
+    from ml.resume.packet import resume_in
+    for path in (resume_in(info["folder"]), resume_in(info["folder"], ".pdf")):
+        if path is not None and path.exists():
             try:
                 return read_document(path).text
             except Exception:

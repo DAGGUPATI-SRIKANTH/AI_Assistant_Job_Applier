@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% block title %}Watch list{% endblock %}
+{% block body %}
+<header class="top">
+  <div>
+    <h1>Watch list</h1>
+    <div class="sub">Companies you follow and jobs you saved. A watched company's job boards are read every
+      morning; roles that arrived since you last looked are marked <b>New</b>.</div>
+  </div>
+</header>
+
+<section class="stats wl-stats">
+  <div class="stat"><span class="k">Companies</span><span class="v" id="n-co">–</span><span class="note">watched</span></div>
+  <div class="stat lead"><span class="k">New roles</span><span class="v" id="n-new">–</span><span class="note">since you looked</span></div>
+  <div class="stat"><span class="k">Open roles</span><span class="v" id="n-open">–</span><span class="note">at those companies</span></div>
+  <div class="stat"><span class="k">Saved jobs</span><span class="v" id="n-jobs">–</span><span class="note">starred</span></div>
+</section>
+
+<div class="wl-tabs" role="tablist" aria-label="Watch list">
+  <button role="tab" id="tab-co" aria-selected="true" aria-controls="pane-co">Companies</button>
+  <button role="tab" id="tab-jobs" aria-selected="false" aria-controls="pane-jobs">Saved jobs</button>
+</div>
+
+<section class="card" id="pane-co" role="tabpanel" aria-labelledby="tab-co">
+  <form class="row wl-add" id="add" autocomplete="off">
+    <input id="add-name" list="names" class="wl-input" placeholder="Company name, or a link to its job board"
+           aria-label="Company to watch">
+    <datalist id="names"></datalist>
+    <button class="btn primary" type="submit">Watch</button>
+    <span class="hint" id="add-say" role="status"></span>
+  </form>
+  <div id="companies"><p class="hint">Loading…</p></div>
+</section>
+
+<section class="card" id="pane-jobs" role="tabpanel" aria-labelledby="tab-jobs" hidden>
+  <div id="jobs"><p class="hint">Loading…</p></div>
+</section>
+
+<style>
+.wl-stats{margin-bottom:14px}
+.wl-tabs{display:flex;gap:6px;margin:0 0 10px}
+.wl-tabs button{border:1px solid var(--line);background:var(--card,transparent);color:inherit;border-radius:999px;
+  padding:6px 14px;font:inherit;cursor:pointer}
+.wl-tabs button[aria-selected="true"]{background:var(--signal-soft);color:var(--signal-ink);border-color:transparent;font-weight:600}
+.wl-add{gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.wl-input{flex:1 1 280px;min-width:0;padding:8px 10px;border:1px solid var(--line);border-radius:8px;
+  background:var(--sunk);color:inherit;font:inherit}
+.wl-co{border-top:1px solid var(--line);padding:12px 0}
+.wl-co:first-child{border-top:0}
+.wl-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 12px}
+.wl-head h2{font-size:1.05rem;margin:0}
+.wl-head .wl-act{margin-left:auto;display:flex;gap:6px}
+.wl-new{background:var(--signal-soft);color:var(--signal-ink);font-weight:600}
+.wl-boards{margin-top:2px}
+.wl-co table{width:100%;min-width:0;border-collapse:collapse;margin-top:8px;table-layout:fixed}
+.wl-co td{padding:4px 8px 4px 0;vertical-align:top;border-top:1px solid color-mix(in srgb,var(--line) 60%,transparent);
+  overflow-wrap:anywhere}
+.wl-co td.wl-age{width:5.5em}
+.wl-co td.wl-st{width:9em}
+.wl-co td.num,.wl-jobs td.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;width:3.5em}
+.wl-more{margin-top:6px}
+.wl-jobs{width:100%;min-width:0;border-collapse:collapse}
+.wl-jobs th{text-align:left;font-weight:600;padding:6px 8px 6px 0;border-bottom:1px solid var(--line)}
+.wl-jobs td{padding:6px 8px 6px 0;vertical-align:top;border-top:1px solid color-mix(in srgb,var(--line) 60%,transparent);
+  overflow-wrap:anywhere}
+.wl-closed{color:var(--muted)}
+.wl-state-open{color:var(--good)}
+.wl-state-closed{color:var(--muted)}
+.wl-unstar{border:0;background:none;color:var(--warn);font-size:1.1rem;cursor:pointer;padding:0 4px}
+@media (max-width:640px){.wl-head .wl-act{margin-left:0;width:100%}.wl-hide-sm{display:none}}
+</style>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const SHOW = 8;
+let DATA = {companies: [], jobs: []}, poll = null, open = new Set();
+
+// Remember the tab between visits; the page works the same when storage is unavailable.
+function tab(which) {
+  ['co', 'jobs'].forEach(t => {
+    $('tab-' + t).setAttribute('aria-selected', String(t === which));
+    $('pane-' + t).hidden = t !== which;
+  });
+  try { localStorage.setItem('wl-tab', which); } catch (e) {}
+}
+$('tab-co').addEventListener('click', () => tab('co'));
+$('tab-jobs').addEventListener('click', () => tab('jobs'));
+try { if (localStorage.getItem('wl-tab') === 'jobs') tab('jobs'); } catch (e) {}
+
+const BOARD = {greenhouse: 'Greenhouse', lever: 'Lever', ashby: 'Ashby', workday: 'Workday', workable: 'Workable',
+  recruitee: 'Recruitee', teamtailor: 'Teamtailor', bamboohr: 'BambooHR', breezy: 'Breezy', jazzhr: 'JazzHR', jobvite: 'Jobvite'};
+const fit = s => s === null || s === undefined ? '<span class="hint" title="Not scored yet">–</span>' : `<b>${s}%</b>`;
+
+function boardsLine(c) {
+  const l = c.lookup || {};
+  if (l.state === 'looking') return '<span class="hint">Looking for its careers page and job board… (a minute or two)</span>';
+  if (l.state === 'reading') return '<span class="hint">Reading its job board now…</span>';
+  if (c.boards.length) {
+    const names = [...new Set(c.boards.map(b => BOARD[b.system] || b.system))].join(' · ');
+    return `<span class="hint">Read every morning from ${esc(names)}${l.read ? ` · just read: ${l.read.kept} role(s) fit your search` : ''}</span>`;
+  }
+  if (l.state === 'not_found' || l.state === 'error')
+    return `<span class="hint">${esc(l.detail || 'No job board found.')}</span>
+            <button class="btn" type="button" data-find="${esc(c.key)}">Look again</button>`;
+  return '<span class="hint">No job board the app reads yet.</span>' +
+         ` <button class="btn" type="button" data-find="${esc(c.key)}">Find its careers page</button>`;
+}
+
+function companyHtml(c) {
+  const all = open.has(c.key), rows = all ? c.jobs : c.jobs.slice(0, SHOW);
+  const table = c.jobs.length ? `<table><tbody>${rows.map(r => `<tr>
+      <td class="num">${fit(r.score)}</td>
+      <td><a href="/job/${r.id}">${esc(r.title)}</a>${r.new ? ' <span class="pill wl-new">New</span>' : ''}
+        <div class="hint">${esc(r.location)}${r.more ? ` · +${r.more} more location${r.more === 1 ? '' : 's'}` : ''}</div></td>
+      <td class="hint wl-hide-sm wl-age">${esc(r.age)}</td>
+      <td class="wl-hide-sm wl-st"><span class="pill">${esc(r.status)}</span></td></tr>`).join('')}</tbody></table>
+      ${c.jobs.length > SHOW ? `<button class="btn wl-more" type="button" data-more="${esc(c.key)}">${all ? 'Show fewer' : `Show all ${c.jobs.length}`}</button>` : ''}`
+    : '<p class="hint">No open roles there that fit your search right now. They show here, marked New, when one opens.</p>';
+  return `<div class="wl-co" data-key="${esc(c.key)}">
+    <div class="wl-head"><h2>${esc(c.name)}</h2>
+      <span class="hint">${c.jobs.length} open role${c.jobs.length === 1 ? '' : 's'}</span>
+      ${c.new ? `<span class="pill wl-new">${c.new} new</span>` : ''}
+      <span class="wl-act">${c.new ? `<button class="btn" type="button" data-seen="${esc(c.key)}">Mark seen</button>` : ''}
+        <button class="btn" type="button" data-remove="${esc(c.key)}" aria-label="Stop watching ${esc(c.name)}">Remove</button></span></div>
+    <div class="wl-boards">${boardsLine(c)}</div>${table}</div>`;
+}
+
+function jobsHtml(jobs) {
+  if (!jobs.length) return '<p class="hint">No saved jobs yet. Press <b>☆ Watch</b> on a job\'s page, or ★ in the Jobs list, to keep it here.</p>';
+  return `<div class="t-table-wrap"><table class="wl-jobs"><thead><tr>
+      <th class="num">Fit</th><th>Job</th><th class="wl-hide-sm">Status</th><th class="wl-hide-sm">Posted</th><th>Posting</th><th></th>
+    </tr></thead><tbody>${jobs.map(j => `<tr class="${j.open ? '' : 'wl-closed'}">
+      <td class="num">${fit(j.score)}</td>
+      <td><a href="/job/${j.id}"><b>${esc(j.title)}</b></a><div class="hint">${esc(j.company)}${j.location ? ' · ' + esc(j.location) : ''}</div></td>
+      <td class="wl-hide-sm"><span class="pill">${esc(j.status)}</span></td>
+      <td class="hint wl-hide-sm">${esc(j.age)}</td>
+      <td>${j.open ? `<span class="wl-state-open">Open</span>${j.deadline ? `<div class="hint">Closes ${esc(j.deadline)}</div>` : ''}`
+                   : `<span class="wl-state-closed">Closed${j.closed ? ' ' + esc(j.closed) : ''}</span>`}</td>
+      <td><button class="wl-unstar" type="button" data-unstar="${j.id}" title="Take off the watch list" aria-label="Take ${esc(j.title)} off the watch list">★</button></td>
+    </tr>`).join('')}</tbody></table></div>`;
+}
+
+function draw() {
+  const cos = DATA.companies, jobs = DATA.jobs;
+  $('n-co').textContent = cos.length;
+  $('n-new').textContent = cos.reduce((n, c) => n + c.new, 0);
+  $('n-open').textContent = cos.reduce((n, c) => n + c.jobs.length, 0);
+  $('n-jobs').textContent = jobs.length;
+  $('companies').innerHTML = cos.length ? cos.map(companyHtml).join('')
+    : '<p class="hint">Add a company you would like to work for. Its open roles that fit your search show here, and new ones are marked as they arrive.</p>';
+  $('jobs').innerHTML = jobsHtml(jobs);
+  const busy = cos.some(c => ['looking', 'reading'].includes((c.lookup || {}).state));
+  clearTimeout(poll);
+  if (busy) poll = setTimeout(load, 4000);
+}
+
+async function load() {
+  try {
+    const d = await (await fetch('/watchlist/data')).json();
+    if (d.ok) { DATA = d; draw(); }
+  } catch (e) { poll = setTimeout(load, 5000); }
+}
+
+async function post(url, body) {
+  try {
+    const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {})});
+    return await r.json();
+  } catch (e) { return {ok: false, error: 'The app did not answer. Try again.'}; }
+}
+
+$('add').addEventListener('submit', async e => {
+  e.preventDefault();
+  const name = $('add-name').value.trim();
+  if (!name) return;
+  $('add-say').textContent = 'Adding…';
+  const r = await post('/watchlist/companies', {name});
+  $('add-say').textContent = r.ok ? `Watching ${r.entry.name}.` : r.error;
+  if (r.ok) { $('add-name').value = ''; load(); }
+});
+
+let typing;
+$('add-name').addEventListener('input', e => {
+  clearTimeout(typing);
+  const q = e.target.value.trim();
+  if (q.length < 2 || /^https?:|\//.test(q)) return;
+  typing = setTimeout(async () => {
+    try {
+      const d = await (await fetch('/watchlist/names?q=' + encodeURIComponent(q))).json();
+      $('names').innerHTML = (d.names || []).map(n => `<option value="${esc(n)}">`).join('');
+    } catch (err) {}
+  }, 200);
+});
+
+document.addEventListener('click', async e => {
+  const t = e.target.closest('button');
+  if (!t) return;
+  if (t.dataset.remove && confirm('Stop watching this company?')) { await post(`/watchlist/companies/${encodeURIComponent(t.dataset.remove)}/remove`); load(); }
+  else if (t.dataset.seen) { await post(`/watchlist/companies/${encodeURIComponent(t.dataset.seen)}/seen`); load(); }
+  else if (t.dataset.find) { t.disabled = true; await post(`/watchlist/companies/${encodeURIComponent(t.dataset.find)}/find`); setTimeout(load, 600); }
+  else if (t.dataset.more) { open.has(t.dataset.more) ? open.delete(t.dataset.more) : open.add(t.dataset.more); draw(); }
+  else if (t.dataset.unstar) { await post(`/job/${t.dataset.unstar}/watch`, {on: false}); load(); }
+});
+
+load();
+</script>
+{% endblock %}

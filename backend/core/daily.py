@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from data_engineering.db.models import Job, utcnow
 from data_engineering.db.session import get_session
@@ -69,6 +69,7 @@ class DailyReport:
     jobs_closed: int = 0
     jobs_reopened: int = 0
     scrape_failures: int = 0
+    fetched_by: str = ""        # "the GitHub run" when the boards were read in the cloud
 
     scored: int = 0
     exported: int = 0
@@ -116,13 +117,36 @@ def _run_stage(report: DailyReport, name: str, fn) -> object:
         return None
 
 
-def run_daily(cfg, skip_scrape: bool = False, since_hours: int = 24) -> DailyReport:
-    """Scrape, retire what vanished, re-rank, and push to the sheet."""
+def run_daily(cfg, skip_scrape: bool = False, since_hours: int = 24, cloud: bool = False) -> DailyReport:
+    """Scrape, retire what vanished, re-rank, and push to the sheet.
+
+    `cloud`: the scheduled morning. The GitHub run reads the boards early, laptop shut or off;
+    its postings are brought in when it has finished, waited for when it is under way, and the
+    boards are read here only when there is no run today (devops/cloud_results.py). The job feeds
+    and alert emails are read here either way: they need this Mac's keys and mailbox."""
     report = DailyReport()
     cutoff = utcnow() - timedelta(hours=since_hours)
 
+    # -- 1a. the GitHub run's postings, on a scheduled morning ----------------
+    from_cloud = None
+    if cloud and not skip_scrape:
+        def _cloud():
+            from devops.cloud_results import bring_in
+            return bring_in(say=lambda line: print(f"{datetime.now():%H:%M:%S}  {line}", flush=True))
+
+        from_cloud = _run_stage(report, "cloud", _cloud)
+        if from_cloud:
+            report.companies = from_cloud.get("boards", 0)
+            report.jobs_new = from_cloud.get("added", 0)
+            report.jobs_seen = report.jobs_new + from_cloud.get("refreshed", 0)
+            report.jobs_closed = from_cloud.get("closed", 0)
+            report.jobs_reopened = from_cloud.get("reopened", 0)
+            report.fetched_by = "the GitHub run"
+            report.stages[-1].detail = (f"{report.jobs_new} new, {report.jobs_closed} closed, "
+                                        f"from run {from_cloud.get('run')}")
+
     # -- 1. scrape (also closes postings that vanished) --------------------
-    if not skip_scrape:
+    if not skip_scrape and not from_cloud:
         def _scrape():
             from data_engineering.scraper.runner import run_scrape, sync_seed_companies
 
@@ -245,7 +269,9 @@ def run_daily(cfg, skip_scrape: bool = False, since_hours: int = 24) -> DailyRep
 def render_digest(report: DailyReport, cfg, top: int = 10) -> str:
     """The digest, as plain text. This is what the user actually reads."""
     threshold = float(cfg.get("resume.min_score", 0.6))
-    when = report.started_at.strftime("%a %d %b %Y, %H:%M")
+    # Kept in UTC; the digest is read in local time (it said 11:02 for a 6:02 start).
+    started = report.started_at if report.started_at.tzinfo else report.started_at.replace(tzinfo=timezone.utc)
+    when = started.astimezone().strftime("%a %d %b %Y, %H:%M")
     lines = [f"JOB DIGEST — {when}", "=" * 58, ""]
 
     # Lead with what changed. Totals look identical every morning; changes do not.
@@ -277,7 +303,8 @@ def render_digest(report: DailyReport, cfg, top: int = 10) -> str:
 
     lines.append("-" * 58)
     lines.append(
-        f"  {report.companies} boards scraped   {report.jobs_seen:,} postings seen   "
+        f"  {report.companies} boards scraped{' by ' + report.fetched_by if report.fetched_by else ''}   "
+        f"{report.jobs_seen:,} postings seen   "
         f"{report.exported} rows updated"
     )
 

@@ -169,15 +169,16 @@ def open_questions(job, applicant) -> list[dict]:
 
 # -- getting one job ready ----------------------------------------------------------
 
-def _tailor(cfg, job) -> dict | None:
-    """Resume Tailoring for this job with the saved resume, unless it is done already."""
+def _tailor(cfg, job, again: bool = False) -> dict | None:
+    """Resume Tailoring for this job with the saved resume, unless it is done already -- or done
+    from a resume since repaired (ml.tailoring.pipeline.needs_redo), or `again` is asked."""
     from ml.resume.packet import packet_dir, packet_root
     from ml.resume.pipeline import base_resume_path
     from ml.resume.writer import output_filename
     from ml.tailoring import pipeline as tailoring
 
     best, score = tailoring.job_best(job.id)
-    if best:
+    if best and not again and not tailoring.needs_redo(job.id):
         return {"run": best, "ats": score}
     folder = tailoring.new_run()
     resume = tailoring.save_saved_resume(folder, base_resume_path(cfg))

@@ -422,6 +422,45 @@ def hint(field: dict) -> str:
     return " ".join(p for p in parts if p).lower()
 
 
+_YESNO_JS = r"""(prefix) => {
+  const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const said = e => (e.innerText || e.textContent || '').trim().toLowerCase();
+  const out = [];
+  let n = 0;
+  for (const box of document.querySelectorAll('div, fieldset, span')) {
+    const buttons = [...box.children].filter(c => c.tagName === 'BUTTON' && vis(c));
+    if (buttons.length !== 2) continue;
+    const yes = buttons.find(b => said(b) === 'yes'), no = buttons.find(b => said(b) === 'no');
+    if (!yes || !no) continue;
+    // The question: a label pointing into this field, else the nearest label or legend above it.
+    let label = null, up = box;
+    for (let i = 0; i < 4 && up && !label; i++, up = up.parentElement) {
+      label = [...up.querySelectorAll('label, legend')].find(l => !box.contains(l) && said(l).length > 2) || null;
+    }
+    if (!label) continue;
+    const text = (label.innerText || label.textContent || '').replace(/\s+/g, ' ').trim();
+    const keys = [prefix + (n++), prefix + (n++)];
+    yes.setAttribute('data-ja-yn', keys[0]); no.setAttribute('data-ja-yn', keys[1]);
+    const pressed = b => b.getAttribute('aria-pressed') === 'true' || /selected|active|checked/i.test(b.className);
+    out.push({label: text.replace(/\s*\*$/, ''), keys,
+              pressed: pressed(yes) ? 'yes' : pressed(no) ? 'no' : null,
+              required: /required/i.test(label.className) || /\*\s*$/.test(text)});
+  }
+  return out;
+}"""
+
+
+def yes_no(page) -> list[dict]:
+    """Questions answered by pressing a Yes or a No button: {label, keys, pressed, required}."""
+    global _scan
+    _scan += 1
+    try:
+        return page.evaluate(_YESNO_JS, f"yn{_scan}-") or []
+    except Exception as exc:
+        log.debug("Yes/No scan failed: %s", exc)
+        return []
+
+
 def signature(field: dict) -> str:
     """The same field, however often the page is read: its question, name and kind."""
     return "|".join([field.get("kind") or "", (field.get("label") or "")[:120], field.get("name") or "",
@@ -470,10 +509,19 @@ def value_for(field: dict, applicant: Applicant, *, letter_text: str | None = No
     for token in reversed((field.get("auto") or "").split()):
         if token in AUTOCOMPLETE:
             return str(AUTOCOMPLETE[token](applicant) or "").strip() or None
+    # A race question is known by its choices: Ashby labels it with the first race's description
+    # ("Hispanic or Latino - A person of Cuban…"), which read as the Hispanic/Latino question.
+    choices = " | ".join(field.get("options") or []).lower()
+    if sum(w in choices for w in ("asian", "white", "black", "hawaiian", "american indian", "two or more")) >= 3:
+        return str(applicant.demographics.get("race_ethnicity") or "").strip() or None
     if "cover" in words and "letter" in words:
         return (letter_text or "").strip() or None if field.get("kind") == "textarea" else None
     if "email" in words:
         return applicant.email or None
+    if "legal" in words and "name" in words and not words & {"company", "employer", "entity", "business"}:
+        # "Legal Name … exactly as shown on your government-issued ID": the full legal name, which can
+        # be longer than the name the person goes by ("Jordan Example" for "Jordan A. Example").
+        return str(applicant.personal.get("legal_name") or "").strip() or applicant.full_name or None
     if (re.search(r"\b(full|legal|your|candidate|applicant)\s+name\b", said) or label.lower().rstrip(": ") == "name"
             or (field.get("name") or "").lower() == "name") \
             and not words & {"company", "employer", "school", "reference", "manager", "referrer", "preferred"}:
@@ -502,7 +550,23 @@ def choose(options: list[str], answer: str | None) -> int | None:
     got = pick(options, want)
     if got is None and want.upper() in US_STATES:
         got = pick(options, US_STATES[want.upper()].title())
+    if got is None:
+        got = _same_meaning(options, want)
     return options.index(got) if got is not None else None
+
+
+def _same_meaning(options: list[str], want: str) -> str | None:
+    """Self-identification answers worded differently by each form: "I am not a protected veteran"
+    is also "I am not a veteran" or "No"; "No, I do not have a disability…" is "No, I don't have one"."""
+    low = want.lower()
+    usable = [o for o in options if not any(p in o.lower() for p in DECLINE_PHRASES)]
+    if "veteran" in low and re.search(r"\bnot\b", low):
+        found = [o for o in usable if "veteran" in o.lower() and re.search(r"\bnot\b|n't\b", o.lower())]
+        return min(found, key=len) if found else next((o for o in usable if o.strip().lower() == "no"), None)
+    if "disability" in low and low.startswith("no"):
+        found = [o for o in usable if o.strip().lower().startswith("no")]
+        return min(found, key=len) if found else None
+    return None
 
 
 # -- filling -----------------------------------------------------------------------------------
@@ -612,6 +676,30 @@ def fill(page, job_id: int, url: str, applicant: Applicant, resume_path: Path | 
             log.debug("Field %r not filled: %s", name, exc)
             result.left_blank.append(name)
             if field["required"]:
+                result.required_blank.append(name)
+
+    # Yes/No asked with two buttons (Ashby: "Are you authorized to work…?"), not with inputs.
+    for question in yes_no(page):
+        sig = "yesno|" + question["label"][:120]
+        if question["pressed"] or sig in seen:
+            continue
+        seen.add(sig)
+        name = question["label"][:60]
+        answer = value_for({"label": question["label"], "kind": "radio", "options": ["Yes", "No"]}, applicant,
+                           letter_text=letter_text, entries=entries)
+        index = choose(["Yes", "No"], answer)
+        if index is None:
+            result.left_blank.append(name)
+            if question["required"]:
+                result.required_blank.append(name)
+            continue
+        try:
+            page.locator(f'[data-ja-yn="{question["keys"][index]}"]').click(timeout=3000)
+            result.filled[question["label"][:300]] = ["Yes", "No"][index]
+        except Exception as exc:
+            log.debug("Yes/No %r not answered: %s", name, exc)
+            result.left_blank.append(name)
+            if question["required"]:
                 result.required_blank.append(name)
 
     try:
@@ -728,12 +816,25 @@ def watch(page, applicant: Applicant, result: FillResult, timeout_s: float, *, r
                     + (f" and attached {', '.join(a.split('=')[0] for a in more.attachments)}" if more.attachments else "")
                     + ".")
                 show_submit(page, scroll=False)
+                _form_shot(page, evidence)    # the first picture was taken before this page was filled
             answers = snapshot(page) or answers
         try:
             page.wait_for_timeout(poll_ms)
         except Exception:
             return "skipped", answers, page
+    _form_shot(page, evidence)                # the form as it was left, for "Did it go?"
     return "timeout", answers, page
+
+
+def _form_shot(page, evidence: Path | None) -> None:
+    """Keep form.png as the form looks now. An Ashby form shows after its Apply tab is pressed,
+    so the first picture was of empty fields while the fill came later."""
+    if evidence is None:
+        return
+    try:
+        page.screenshot(path=str(evidence / "form.png"), full_page=True)
+    except Exception as exc:
+        log.debug("No screenshot: %s", exc)
 
 
 # -- "did it go?" ----------------------------------------------------------------------------------

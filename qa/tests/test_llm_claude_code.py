@@ -44,7 +44,9 @@ def test_it_is_a_model_with_no_tools_and_no_api_key(claude, monkeypatch):
     assert got.text == '{"summary": "x"}' and got.provider == "claude-code" and got.free
     assert cmd[cmd.index("--tools") + 1] == "" and "--strict-mcp-config" in cmd
     assert cmd[cmd.index("--system-prompt") + 1] == "SYSTEM"
-    assert "--no-session-persistence" in cmd and "--model" not in cmd
+    # A Claude model is always named: left out, Claude Code used the last model picked on the Mac,
+    # an Ollama one after `ollama launch claude`, and every call failed or hung (17 Oct 2026).
+    assert "--no-session-persistence" in cmd and cmd[cmd.index("--model") + 1] == llm.DEFAULT_CLAUDE_CODE_MODEL
     assert kw["input"] == "the resume and posting"                 # stdin, not argv
     assert "ANTHROPIC_API_KEY" not in kw["env"]
 

@@ -189,6 +189,96 @@ def _paragraph_block(p, source: str, formats) -> Block | None:
 
 # -- PDF -------------------------------------------------------------------------
 
+def _pdfminer_page(path: Path, index: int) -> str | None:
+    """One page's text by pdfminer, or None when it cannot be had.
+
+    pypdf reads a resume's printed lines one by one and splits words at kerning gaps -- "Cloud
+    Bui ld", "SonarQ ube", "scan ning" -- and a resume imported that way kept the breaks in every
+    line. pdfminer, with words grouped generously, reads the same page whole.
+    """
+    try:
+        from pdfminer.high_level import extract_text
+        from pdfminer.layout import LAParams
+        return extract_text(str(path), page_numbers=[index], laparams=LAParams(char_margin=4.0, word_margin=0.2))
+    except Exception:
+        return None
+
+
+_BULLET = re.compile(r"^[•●▪◦‣∙·\-*]\s+")
+_LABEL = re.compile(r"^[A-Z][\w/&.+()# -]{1,60}:\s")      # "Containerization & Orchestration: Docker…"
+_ENDS_OPEN = re.compile(r"[,\-–—&/(]$|\b(and|or|of|the|to|for|with|in|on|by|a|an)$", re.I)
+
+
+def _core(token: str) -> str:
+    return token.strip(".,;:()[]\"'")
+
+
+def mend_words(lines_text: str, whole: str) -> str:
+    """pypdf's lines with its broken words put back the way pdfminer read them.
+
+    pypdf keeps a resume's lines in their places -- a job title with its dates beside it -- but
+    breaks words at wide letter gaps ("Bui ld", "experien ce.", "frameworks ,", "high -stakes",
+    "20 –"). pdfminer reads the words whole but moves dates into a column of their own. Two
+    pieces become one where pdfminer has the joined word and never the two side by side.
+    """
+    words = whole.split()
+    known = {_core(w) for w in words} | set(words)
+    pairs = {(a, b) for a, b in zip(words, words[1:])}
+    out = []
+    for line in lines_text.splitlines():
+        tokens = line.split()
+        merged: list[str] = []
+        for token in tokens:
+            if merged:
+                joined = merged[-1] + token
+                if (joined in known or _core(joined) in known) and (merged[-1], token) not in pairs \
+                        and _core(joined):
+                    merged[-1] = joined
+                    continue
+            merged.append(token)
+        out.append(" ".join(merged))
+    return "\n".join(out)
+
+
+def logical_lines(text: str) -> list[str]:
+    """A page's printed lines put back into the items they were written as.
+
+    A PDF keeps no paragraphs, only lines, so one bullet wrapped over three lines came back as
+    three bullets, each a fragment. A line continues the item above it when that item is a
+    bullet and the line starts in lower case, or the item stops mid-phrase (a comma, a hyphen,
+    "and"), or the item has not reached its full stop and the line is not a "Label: …" row.
+    A line opening with a bullet, or a heading, job or date line, always starts afresh.
+    """
+    out: list[str] = []
+    open_bullet = False
+    for raw in text.splitlines():
+        line = re.sub(r"\s+", " ", raw).strip()
+        if not line:
+            continue
+        if _BULLET.match(line):
+            out.append("• " + _BULLET.sub("", line))
+            open_bullet = True
+            continue
+        prev = out[-1] if out else ""
+        # A "Label: tools" row wrapped mid-list ("…, Helm," / "PodDisruptionBudgets, …") goes on too.
+        if prev and not open_bullet and _LABEL.match(prev) and prev.endswith(",") and not _LABEL.match(line) \
+                and not _BULLET.match(line):
+            out[-1] = prev + " " + line
+            continue
+        joins = open_bullet and prev and (
+            line[:1].islower() or _ENDS_OPEN.search(prev)
+            or (not prev.endswith((".", "!", "?")) and not _LABEL.match(line) and not line.isupper()
+                and not line.endswith(":")
+                and not re.search(r"\b(19|20)\d\d\b", line)))
+        if joins:
+            glue = "" if re.search(r"\w[-–—]$", prev) else " "
+            out[-1] = prev + glue + line
+        else:
+            out.append(line)
+            open_bullet = False
+    return out
+
+
 def _read_pdf(path: Path, label: str) -> Extracted:
     try:
         from pypdf import PdfReader
@@ -215,12 +305,14 @@ def _read_pdf(path: Path, label: str) -> Extracted:
             text = page.extract_text() or ""
         except Exception:
             text = ""
+        whole = _pdfminer_page(path, number - 1)
+        if whole:
+            text = mend_words(text, whole) if text.strip() else whole
         if len(text.strip()) < OCR_MIN_CHARS:
             scanned_pages.append(number)
             continue
-        for line_no, line in enumerate(text.splitlines(), 1):
-            if line.strip():
-                blocks.append(Block(re.sub(r"\s+", " ", line).strip(), f"page {number}, line {line_no}"))
+        for line_no, line in enumerate(logical_lines(text), 1):
+            blocks.append(Block(line, f"page {number}, line {line_no}"))
 
     ocr_used = False
     if scanned_pages:

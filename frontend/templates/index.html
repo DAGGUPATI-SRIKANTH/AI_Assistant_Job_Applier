@@ -1,6 +1,54 @@
 {% extends "base.html" %}
 {% block title %}Jobs{% endblock %}
 {% block body %}
+<aside class="mail-pop" id="mail-pop" role="status" aria-live="polite" hidden>
+  <div class="mail-head"><b>📬 From your email</b>
+    <button class="mail-x" type="button" id="mail-dismiss" aria-label="Dismiss these updates">Dismiss</button></div>
+  <ul class="mail-list" id="mail-list"></ul>
+  <a class="mail-all" href="{{ url_for('applications_page') }}#email">All email updates →</a>
+</aside>
+<style>
+.mail-pop{position:fixed;right:16px;bottom:16px;z-index:50;width:min(380px,calc(100vw - 32px));
+  background:var(--card,#fff);border:1px solid var(--line);border-radius:12px;padding:12px 14px;
+  box-shadow:0 10px 30px rgba(0,0,0,.18)}
+.mail-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px}
+.mail-x{border:1px solid var(--line);background:none;color:inherit;border-radius:8px;padding:3px 10px;cursor:pointer;font:inherit}
+.mail-list{list-style:none;margin:0;padding:0;max-height:50vh;overflow:auto}
+.mail-list li{padding:7px 0;border-top:1px solid color-mix(in srgb,var(--line) 60%,transparent)}
+.mail-list li:first-child{border-top:0}
+.mail-k{font-weight:600}
+.mail-k.rej{color:var(--muted)} .mail-k.good{color:var(--good)} .mail-k.int{color:var(--signal-ink)}
+.mail-all{display:inline-block;margin-top:6px;font-size:.9em}
+</style>
+<script>
+// Email about applications (backend/apply/inbox.py): what changed, until dismissed.
+(function () {
+  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+  const tone = k => k === 'rejection' || k === 'closed' ? 'rej' : (k === 'offer' || k === 'confirmation') ? 'good' : 'int';
+  let shown = [];
+  async function look() {
+    let d;
+    try { d = await (await fetch('/inbox/updates?unseen=1')).json(); } catch (e) { return; }
+    const items = (d && d.updates) || [];
+    const pop = document.getElementById('mail-pop');
+    if (!items.length) { pop.hidden = true; return; }
+    shown = items.map(u => u.id);
+    document.getElementById('mail-list').innerHTML = items.slice(0, 5).map(u => `<li>
+      <span class="mail-k ${tone(u.kind)}">${esc(u.label)}</span> · ${esc(u.company)}${u.title ? ' — ' + esc(u.title) : ''}
+      <div class="hint">${esc(u.change)} · ${esc((u.date || '').slice(0, 10))} · “${esc(u.subject)}”</div>
+      ${u.job_id ? `<a href="/applications/${u.job_id}">Open →</a>` : ''}</li>`).join('')
+      + (items.length > 5 ? `<li class="hint">…and ${items.length - 5} more</li>` : '');
+    pop.hidden = false;
+  }
+  document.getElementById('mail-dismiss').addEventListener('click', async () => {
+    try { await fetch('/inbox/updates/seen', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                              body: JSON.stringify({ids: shown})}); } catch (e) {}
+    document.getElementById('mail-pop').hidden = true;
+  });
+  look();
+  setInterval(look, 5 * 60 * 1000);          // the app looks at the mailbox every half hour
+})();
+</script>
 <header class="top">
   <div>
     <h1>Jobs</h1>
@@ -24,6 +72,20 @@
     </div>
   </div>
 </header>
+
+<section class="morning" id="morning" aria-labelledby="morning-title">
+  <div class="m-text">
+    <h2 id="morning-title">Morning run</h2>
+    <div class="hint">New postings from every board, scored against your resume, then applications prepared
+      for the best ten. <span id="m-last"></span></div>
+  </div>
+  <div class="m-controls">
+    <button class="btn primary" id="m-start" type="button">Start now</button>
+    <button class="btn" id="m-stop" type="button" hidden>Stop</button>
+    <label class="switch" title="Off: it runs only when you press Start now"><input type="checkbox" id="m-auto" checked> Start by itself at 6 AM</label>
+  </div>
+  <div class="hint m-help" id="m-help"></div>
+</section>
 
 <section class="resume {% if not resume %}none{% endif %}">
   <span class="lbl">Resume</span>
@@ -136,6 +198,7 @@
   <button class="chip" id="f-reach" aria-pressed="false" title="Asks for no more years than you have, or does not say">Within my experience</button>
   <button class="chip" id="f-eligible" aria-pressed="false" title="Hides jobs whose posting needs a clearance you don't hold, US citizenship you don't have, or won't sponsor a visa you need — from your profile">I'm eligible</button>
   <button class="chip" id="f-new" aria-pressed="false">Not yet applied</button>
+  <button class="chip" id="f-watch" aria-pressed="false" title="Jobs you starred, and jobs at companies on your Watch list">★ Watch list</button>
   <button class="chip" id="f-fresh" aria-pressed="false">Under 3 months</button>
   <select id="f-clr" class="efilter" aria-label="Clearance">
     <option value="">Any clearance</option>
@@ -196,15 +259,39 @@
 </div>
 <div class="rulebar" id="rulebar">
   <span class="sub">Filter by</span>
-  <span class="rule"><select class="efilter rule-col" data-n="0" aria-label="Filter 1: column"><option value="">Choose a column…</option><option value="score">Fit</option><option value="ageDays">Age</option><option value="workplace">Where</option><option value="expMin">Experience</option><option value="payMin">Salary</option><option value="company">Company</option><option value="title">Role</option><option value="clr">Clearance</option><option value="citizen">Citizen</option><option value="visa">Visa</option><option value="board">Board</option><option value="status">Status</option></select><span class="rule-val" id="rv0"></span></span>
-  <span class="rule"><select class="efilter rule-col" data-n="1" aria-label="Filter 2: column"><option value="">Choose a column…</option><option value="score">Fit</option><option value="ageDays">Age</option><option value="workplace">Where</option><option value="expMin">Experience</option><option value="payMin">Salary</option><option value="company">Company</option><option value="title">Role</option><option value="clr">Clearance</option><option value="citizen">Citizen</option><option value="visa">Visa</option><option value="board">Board</option><option value="status">Status</option></select><span class="rule-val" id="rv1"></span></span>
-  <span class="rule"><select class="efilter rule-col" data-n="2" aria-label="Filter 3: column"><option value="">Choose a column…</option><option value="score">Fit</option><option value="ageDays">Age</option><option value="workplace">Where</option><option value="expMin">Experience</option><option value="payMin">Salary</option><option value="company">Company</option><option value="title">Role</option><option value="clr">Clearance</option><option value="citizen">Citizen</option><option value="visa">Visa</option><option value="board">Board</option><option value="status">Status</option></select><span class="rule-val" id="rv2"></span></span>
+  <span class="rule"><select class="efilter rule-col" data-n="0" aria-label="Filter 1: column"><option value="">Choose a column…</option><option value="score">Fit</option><option value="ageDays">Age</option><option value="workplace">Where</option><option value="location">Location</option><option value="expMin">Experience</option><option value="payMin">Salary</option><option value="company">Company</option><option value="title">Role</option><option value="clr">Clearance</option><option value="citizen">Citizen</option><option value="visa">Visa</option><option value="board">Board</option><option value="status">Status</option></select><span class="rule-val" id="rv0"></span></span>
+  <span class="rule"><select class="efilter rule-col" data-n="1" aria-label="Filter 2: column"><option value="">Choose a column…</option><option value="score">Fit</option><option value="ageDays">Age</option><option value="workplace">Where</option><option value="location">Location</option><option value="expMin">Experience</option><option value="payMin">Salary</option><option value="company">Company</option><option value="title">Role</option><option value="clr">Clearance</option><option value="citizen">Citizen</option><option value="visa">Visa</option><option value="board">Board</option><option value="status">Status</option></select><span class="rule-val" id="rv1"></span></span>
+  <span class="rule"><select class="efilter rule-col" data-n="2" aria-label="Filter 3: column"><option value="">Choose a column…</option><option value="score">Fit</option><option value="ageDays">Age</option><option value="workplace">Where</option><option value="location">Location</option><option value="expMin">Experience</option><option value="payMin">Salary</option><option value="company">Company</option><option value="title">Role</option><option value="clr">Clearance</option><option value="citizen">Citizen</option><option value="visa">Visa</option><option value="board">Board</option><option value="status">Status</option></select><span class="rule-val" id="rv2"></span></span>
   <button class="btn primary" id="rules-go">Go</button>
   <button class="btn" id="rules-reset">Reset</button>
   <span class="sub" id="rules-note"></span>
 </div>
 
 
+{% if watch_new %}
+<p class="watch-note"><a href="{{ url_for('watchlist_page') }}">★ {{ watch_new }} new role{{ '' if watch_new == 1 else 's' }}
+  at companies you watch →</a></p>
+{% endif %}
+<style>
+.ti .star{border:0;background:none;padding:0 6px 0 0;cursor:pointer;color:var(--muted);font-size:1rem;line-height:1}
+.ti .star[aria-pressed="true"]{color:var(--warn)}
+.co-watched::before{content:"★ ";color:var(--warn)}
+.watch-note{margin:6px 0 8px}
+.morning{display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px;margin:14px 0 4px;padding:12px 16px;
+  border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+.morning h2{font-size:15px;margin:0 0 2px}
+.morning .m-text{flex:1 1 320px;min-width:0}
+.morning .m-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.morning .m-help{flex-basis:100%;margin:0}
+.morning .switch{font-weight:500;font-size:13.5px}
+#rows td.loc div{display:flex;gap:4px;max-width:150px}
+/* Thirteen columns since Location: where the screen has room, the jobs page takes it, so the table
+   is not cut off at Status (the 1,200px card held twelve). Narrower screens swipe it, as before. */
+@media (min-width:1300px){.wrap,.appbar-in{max-width:1400px}}
+#rows td.loc span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+#rows td.loc .more{color:var(--muted);font-size:12px;flex:none}
+.watch-note a{font-weight:600}
+</style>
 <p class="sub phone-only">Swipe the table sideways to see every column.</p>
 <div class="tw">
   <table>
@@ -213,6 +300,7 @@
       <th data-k="score">Fit <span class="ar"></span></th>
       <th data-k="ageDays" aria-sort="ascending">Age <span class="ar">▲</span></th>
       <th data-k="workplace">Where</th>
+      <th data-k="place" title="Where the job is; +N when the posting names more places (hover to see them)">Location</th>
       <th data-k="expMin">Exp</th>
       <th data-k="payMin">Salary</th>
       <th data-k="company">Company</th>
@@ -252,7 +340,7 @@ const ROWS = RAW.map(r => ({...r,
 
 const state = {q:'', remote:false, strong:false, paid:false, fresh:false,
                recent:false, board:'', today:false, week:false, pay150:false,
-               reach:false, eligible:false, clr:'', ctz:'', visa:'', rules:[]};
+               reach:false, eligible:false, watch:false, clr:'', ctz:'', visa:'', rules:[]};
 // Years of experience the derived profile says you have. Used by the
 // "Within my experience" filter, which hides roles asking for more.
 const MY_YEARS = {{ my_years or 'null' }};
@@ -262,7 +350,7 @@ const MY_YEARS = {{ my_years or 'null' }};
 // Up to three sorts, applied in order: the second breaks ties in the first, the third in the second.
 let sorts = [{k: 'ageDays', dir: 1}];
 // Text sorts A-Z first; numbers biggest first, except age, where newest (smallest) leads.
-const TEXT_KEYS = ['company', 'title', 'board', 'workplace', 'status', 'citizen', 'visa'];
+const TEXT_KEYS = ['company', 'title', 'board', 'workplace', 'place', 'status', 'citizen', 'visa'];
 const firstDir = k => TEXT_KEYS.includes(k) || k === 'ageDays' ? 1 : -1;
 
 function visible() {
@@ -284,6 +372,7 @@ function visible() {
     if (state.reach && MY_YEARS !== null && r.expMin !== null
         && r.expMin > MY_YEARS) return false;
     if (state.eligible && r.eligible === false) return false;
+    if (state.watch && !(r.starred || r.watched)) return false;
     if (state.clr) {
       const level = (r.clr || '').replace(/\+poly| \(obtain\)/g, '');
       const hold = r.clrRank >= 10;
@@ -320,6 +409,48 @@ function visible() {
   });
 }
 
+// Where the job is: the first place the posting names, without ", United States", and "+N" for the
+// others; every place on hover. Postings list places split by ";" ("Austin, TX; Denver, Colorado, …").
+// Where already says remote, hybrid or onsite, so Location says only the place: "remote" beside
+// "Remote" said the same thing twice, and "Remote (NYC, New York)" reads "NYC, New York".
+const WORKPLACE_WORDS = /\b(fully\s+)?(remote|hybrid|on-?site|in[- ]office|in[- ]person|work from home)\b/gi;
+const tidyPlace = text => text.replace(/[()\[\]*]/g, ' ').replace(/\s+/g, ' ').replace(/\s+([,:;])/g, '$1')
+  .replace(/^[\s,:;\/–-]+|[\s,:;\/–-]+$/g, '')
+  .replace(/^(or|and)\s+|\s+(or|and)$/gi, '')         // "Remote or Washington", "Chicago or Remote*"
+  .replace(/^[\s,:;\/–-]+|[\s,:;\/–-]+$/g, '');
+// "Austin, TX | Remote | Hybrid" and "Remote Canada | Remote United States": each part on its
+// own, the ones that were only "Remote" dropped, the places kept apart ("Canada / United States").
+const placeOnly = text => text.split('|').map(p => tidyPlace(p.replace(WORKPLACE_WORDS, ' ')))
+  .filter(Boolean).join(' / ');
+const placeOf = (loc, where) => {
+  const all = (loc || '').split(/\s*;\s*/).map(p => p.trim()).filter(Boolean);
+  let first = where ? placeOnly(all[0] || '') : (all[0] || '');
+  first = first.replace(/,\s*(united states( of america)?|usa|us)$/i, '');
+  // A street address names its town after it: "12100 Samsung Blvd, Austin, TX 78754" reads "Austin, TX".
+  const parts = first.split(/\s*,\s*/);
+  if (parts.length >= 3 && /^\d/.test(parts[0])) first = parts.slice(1).join(', ');
+  first = first.replace(/\s+\d{5}(-\d{4})?$/, '');
+  return {first, more: Math.max(all.length - 1, 0), all: all.join('\n').slice(0, 600)};
+};
+// Sorted by what the column shows: some boards send " Palo Alto, CA", and a space sorts before every letter.
+ROWS.forEach(r => { r.place = placeOf(r.location, r.workplace).first; });
+// A state by its name or its two letters: "Texas" finds "Austin, TX", and "tx" finds "Austin, Texas".
+const STATES = {al: 'alabama', ak: 'alaska', az: 'arizona', ar: 'arkansas', ca: 'california', co: 'colorado',
+  ct: 'connecticut', de: 'delaware', dc: 'district of columbia', fl: 'florida', ga: 'georgia', hi: 'hawaii',
+  id: 'idaho', il: 'illinois', in: 'indiana', ia: 'iowa', ks: 'kansas', ky: 'kentucky', la: 'louisiana',
+  me: 'maine', md: 'maryland', ma: 'massachusetts', mi: 'michigan', mn: 'minnesota', ms: 'mississippi',
+  mo: 'missouri', mt: 'montana', ne: 'nebraska', nv: 'nevada', nh: 'new hampshire', nj: 'new jersey',
+  nm: 'new mexico', ny: 'new york', nc: 'north carolina', nd: 'north dakota', oh: 'ohio', ok: 'oklahoma',
+  or: 'oregon', pa: 'pennsylvania', ri: 'rhode island', sc: 'south carolina', sd: 'south dakota',
+  tn: 'tennessee', tx: 'texas', ut: 'utah', vt: 'vermont', va: 'virginia', wa: 'washington',
+  wv: 'west virginia', wi: 'wisconsin', wy: 'wyoming'};
+function placeHas(loc, want) {
+  const text = (loc || '').toLowerCase(), w = want.trim().toLowerCase().replace(/\s+/g, ' ');
+  const code = STATES[w] ? w : Object.keys(STATES).find(c => STATES[c] === w);
+  if (!code) return text.includes(w);
+  return text.includes(STATES[code]) || new RegExp(`(^|[,;(/-]\\s*)${code}\\b`).test(text);
+}
+
 function render() {
   const rows = visible();
   $('count').textContent = `${rows.length} of ${ROWS.length} shown`;
@@ -334,9 +465,11 @@ function render() {
         : r.basis === 'title'
           ? `<span class="sc sc-part" title="Measured against the title only — this posting came from a job alert with no description, so the number is not comparable with the others">~${r.score}</span>`
           : `<span class="sc sc-${band(r.score)}">${r.score}</span>`}</td>
-      <td class="num age"></td><td class="num dim w"></td><td class="num dim e"></td>
+      <td class="num age"></td><td class="num dim w"></td><td class="loc"><div><span></span><span class="more"></span></div></td><td class="num dim e"></td>
       <td class="num y"></td><td class="co"></td>
-      <td class="ti"><a></a>${r.repeats > 1
+      <td class="ti"><button class="star" type="button" data-star="${r.id}" aria-pressed="${r.starred}"
+        title="${r.starred ? 'On your Watch list — press to take it off' : 'Save to your Watch list'}"
+        aria-label="${r.starred ? 'Take off the Watch list' : 'Save to the Watch list'}">${r.starred ? '★' : '☆'}</button><a></a>${r.repeats > 1
         ? `<span class="rep" title="This employer has posted the same role ${r.repeats} times. Shown once, newest first.">×${r.repeats}</span>`
         : ''}</td>
       <td class="elig clr"></td><td class="elig ctz"></td><td class="elig visa"></td>
@@ -346,10 +479,15 @@ function render() {
     age.textContent = r.age;
     if (/\byr\b/.test(r.age)) age.classList.add('stale');
     tr.querySelector('.w').textContent = r.workplace;
+    const place = placeOf(r.location, r.workplace), loc = tr.querySelector('.loc');
+    loc.querySelector('span').textContent = place.first;
+    loc.querySelector('.more').textContent = place.more ? `+${place.more}` : '';
+    if (place.all) loc.title = place.all;
     tr.querySelector('.e').textContent = r.experience;
     tr.querySelector('.y').textContent = r.salary;
     tr.querySelector('.co').textContent = r.company;
-    tr.querySelector('.co').title = r.company;
+    tr.querySelector('.co').title = r.watched ? `${r.company} — on your Watch list` : r.company;
+    if (r.watched) tr.querySelector('.co').classList.add('co-watched');
     const a = tr.querySelector('.ti a');
     a.textContent = r.title; a.href = '/job/' + r.id;
     const clr = tr.querySelector('.clr');
@@ -369,7 +507,7 @@ function render() {
 $('q').addEventListener('input', e => { state.q = e.target.value; render(); });
 [['f-remote','remote'],['f-strong','strong'],['f-paid','paid'],
  ['f-new','fresh'],['f-fresh','recent'],['f-today','today'],
- ['f-week','week'],['f-90k','pay150'],['f-reach','reach'],['f-eligible','eligible']]
+ ['f-week','week'],['f-90k','pay150'],['f-reach','reach'],['f-eligible','eligible'],['f-watch','watch']]
   .forEach(([id,k]) => $(id).addEventListener('click', e => {
     state[k] = !state[k];
     e.currentTarget.setAttribute('aria-pressed', String(state[k]));
@@ -377,6 +515,18 @@ $('q').addEventListener('input', e => { state.q = e.target.value; render(); });
   }));
 
 $('board').addEventListener('change', e => { state.board = e.target.value; render(); });
+
+// ★ in a row: the job on the Watch list, or off it, without leaving the list.
+$('rows').addEventListener('click', async e => {
+  const b = e.target.closest('[data-star]');
+  if (!b) return;
+  const row = ROWS.find(r => r.id === +b.dataset.star), on = !(row && row.starred);
+  try {
+    const r = await (await fetch(`/job/${b.dataset.star}/watch`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({on})})).json();
+    if (r.ok && row) { row.starred = r.on; render(); }
+  } catch (err) {}
+});
 [['f-clr', 'clr'], ['f-ctz', 'ctz'], ['f-visa', 'visa']].forEach(([id, k]) =>
   $(id).addEventListener('change', e => { state[k] = e.target.value; render(); }));
 
@@ -549,24 +699,39 @@ function showScheduled(d) {
   const p = d.daily || {};
   $('statusbox').className = 'statusbox';
   $('sb-dot').className = 'sb-dot on';
-  $('sb-title').textContent = `6 AM fetch running · started ${p.started || d.scheduled_since}`;
-  $('sb-eta').textContent = mins(p.eta);
-  const asleep = p.quiet_for > 300
-    ? ` · no progress for ${Math.round(p.quiet_for / 60)} min: the Mac may be asleep (lid closed or unplugged)` : '';
-  if (p.total && p.stage === 'fetching') {
-    $('sb-track').hidden = false;
+  const by = p.started_by === 'you' ? 'started by you' : 'started at 6 AM';
+  $('sb-title').textContent = `Morning run · ${by} · ${p.started || d.scheduled_since}`;
+  const fetching = p.stage === 'fetching';
+  $('sb-eta').textContent = fetching ? mins(p.eta) : '';
+  // Only a fetch can be told apart from a sleeping Mac by its silence; the other steps write
+  // nothing for minutes while a model writes a resume, and were reported as "asleep".
+  const quiet = fetching && p.quiet_for > 300
+    ? ` · no board finished in ${Math.round(p.quiet_for / 60)} min — if the lid was shut, it carries on now it is open` : '';
+  const preparing = p.stage === 'preparing' && p.prepare_total;
+  $('sb-track').hidden = !((fetching && p.total) || preparing);
+  if (fetching && p.total) {
     $('sb-fill').style.width = (p.percent || 0) + '%';
-    $('sb-detail').textContent = `${p.percent}% · ${p.done.toLocaleString()}/${p.total.toLocaleString()} boards`
-      + (p.current ? ` · ${p.current}` : '') + asleep;
+    $('sb-detail').textContent = `Fetching · ${p.percent}% · ${p.done.toLocaleString()}/${p.total.toLocaleString()} boards`
+      + (p.current ? ` · ${p.current}` : '') + quiet;
   } else {
-    $('sb-track').hidden = true;
-    $('sb-detail').textContent = (p.total ? `All ${p.total.toLocaleString()} boards read · scoring the new postings and preparing applications`
-                                          : 'starting…') + asleep;
+    if (preparing) $('sb-fill').style.width = Math.round(p.prepared / p.prepare_total * 100) + '%';
+    const failed = p.failed ? ` (${p.failed.toLocaleString()} could not be reached)` : '';
+    const usual = p.cloud_usual ? `, usually about ${p.cloud_usual >= 90 ? (p.cloud_usual / 60).toFixed(1) + ' h' : p.cloud_usual + ' min'}` : '';
+    $('sb-detail').textContent = {
+      waiting: 'Waiting for the Mac to be opened: it starts within a minute of opening the lid',
+      'cloud-wait': `Waiting for the GitHub fetch${p.cloud_started ? ` (started ${p.cloud_started}${usual})` : ''}`
+        + ' instead of reading every board again here; its postings come in when it finishes',
+      'cloud-collect': 'Bringing in the postings the GitHub fetch found…',
+      scoring: p.from_cloud ? 'The GitHub fetch’s postings are in · scoring the new ones against your resume'
+        : `All ${(p.total || 0).toLocaleString()} boards read${failed} · scoring the new postings against your resume`,
+      suggesting: 'Scored · finding skills worth adding for the top ten jobs',
+      preparing: `Preparing applications: ${p.prepared} of ${p.prepare_total} ready (resume, cover letter, questions)`,
+    }[p.stage] || 'starting…';
   }
   ['scrape', 'score'].forEach(t => {
     $('run-'+t).disabled = true;
-    $('run-'+t).textContent = t === 'scrape' ? '6 AM fetch running…' : 'Scoring after the 6 AM fetch…';
-    $('run-'+t).title = 'The 6 AM run is doing this now; the button comes back when it finishes.';
+    $('run-'+t).textContent = 'Morning run going…';
+    $('run-'+t).title = 'The morning run does this; the button comes back when it finishes.';
   });
 }
 function watchScheduled(first) {
@@ -574,7 +739,7 @@ function watchScheduled(first) {
   const poll = async () => {
     const d = await ask('/run/scrape/status');
     if (d.ok && d.scheduled) { showScheduled(d); setTimeout(poll, 5000); return; }
-    $('sb-title').textContent = 'The 6 AM run finished';
+    $('sb-title').textContent = 'The morning run is over';
     $('sb-detail').textContent = 'Reloading with the new postings…';
     $('sb-track').hidden = true;
     setTimeout(() => location.reload(), 2500);
@@ -639,6 +804,70 @@ async function watch(task, button) {
     return; }
   watch(task, b);
 }));
+
+// -- The morning run: Start, Stop, and whether it starts by itself at 6 AM ------------------
+const HELP_ON = 'GitHub reads every board early each morning, even with the laptop shut or off; the morning run ' +
+  'takes those postings (or waits for them) and reads the boards here only when GitHub has none. With the lid shut ' +
+  'at 6 AM it starts within a minute of you opening it, and a Mac that was off starts it when it comes on.';
+const HELP_OFF = 'Off: nothing starts at 6 AM. Press Start now whenever you want new postings.';
+function morningLast(last) {
+  if (!last || !last.ended) return '';
+  const at = s => new Date(s.replace(' ', 'T')).toLocaleString([], {weekday: 'short', hour: 'numeric', minute: '2-digit'});
+  const how = {finished: 'finished', failed: 'ended with an error (see data/daily_run.log)', stopped: 'stopped'}[last.how] || 'ended';
+  return `Last run: ${at(last.started)}, ${how} ${at(last.ended)}.`;
+}
+async function pollMorning() {
+  const d = await ask('/run/morning');
+  if (!d.ok) { setTimeout(pollMorning, 60000); return; }
+  $('m-auto').checked = !!d.auto;
+  $('m-help').textContent = d.auto ? HELP_ON : HELP_OFF;
+  $('m-start').hidden = !!d.running;
+  $('m-stop').hidden = !(d.running || d.page_task);
+  $('m-stop').textContent = d.running ? 'Stop'
+    : d.page_task === 'scrape' ? 'Stop the fetch' : 'Stop the re-score';
+  $('m-last').textContent = d.running ? '' : morningLast(d.last);
+  setTimeout(pollMorning, d.running || d.page_task ? 5000 : 30000);
+}
+$('m-start').addEventListener('click', async e => {
+  const b = e.currentTarget;
+  b.disabled = true; b.textContent = 'Starting…';
+  const d = await ask('/run/morning/start', {method: 'POST'});
+  b.disabled = false; b.textContent = 'Start now';
+  if (!d.ok) {
+    $('statusbox').className = 'statusbox';
+    $('sb-dot').className = 'sb-dot bad';
+    $('sb-title').textContent = 'Did not start';
+    $('sb-detail').textContent = d.error || '';
+    return;
+  }
+  // Picked up the way a run that started at 6 AM is: from its lock and its log.
+  for (let i = 0; i < 15; i++) {
+    const s = await ask('/run/scrape/status');
+    if (s.ok && s.scheduled) { watchScheduled(s); break; }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  b.hidden = true; $('m-stop').hidden = false; $('m-stop').textContent = 'Stop';
+});
+$('m-stop').addEventListener('click', async e => {
+  if (!confirm('Stop it now? Everything fetched so far is kept.')) return;
+  const b = e.currentTarget;
+  b.disabled = true; b.textContent = 'Stopping…';
+  const d = await ask('/run/morning/stop', {method: 'POST'});
+  $('statusbox').className = 'statusbox';
+  $('sb-dot').className = d.ok ? 'sb-dot done' : 'sb-dot bad';
+  $('sb-title').textContent = d.ok ? 'Stopped' : 'Could not stop it';
+  $('sb-detail').textContent = d.ok ? 'Reloading…' : (d.error || '');
+  if (d.ok) setTimeout(() => location.reload(), 1200);
+  else { b.disabled = false; b.textContent = 'Stop'; }
+});
+$('m-auto').addEventListener('change', async e => {
+  const box = e.currentTarget, on = box.checked;
+  const d = await ask('/run/morning/auto', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                             body: JSON.stringify({on})});
+  if (!d.ok) { box.checked = !on; return; }
+  $('m-help').textContent = on ? HELP_ON : HELP_OFF;
+});
+pollMorning();
 
 // The probe bar. Polls on its own clock: this run is measured in days, so it
 // is almost always mid-flight when the page opens, and it has nothing to do
@@ -821,6 +1050,7 @@ const RULES = {
            test: (r, v) => v === 'none' ? r.expMin === null : v === 'any' ? r.expMin !== null : (r.expMin !== null && r.expMin <= +v)},
   payMin: {opts: [['100000', '$100K+'], ['150000', '$150K+'], ['200000', '$200K+'], ['any', 'Published'], ['none', 'Not published']],
            test: (r, v) => v === 'none' ? r.payMin === null : v === 'any' ? r.payMin !== null : (r.payMin !== null && r.payMin >= +v)},
+  location: {text: 'city, state or Remote…', test: (r, v) => placeHas(r.location, v)},
   company: {text: 'contains…', test: (r, v) => (r.company || '').toLowerCase().includes(v.toLowerCase())},
   title: {text: 'contains…', test: (r, v) => (r.title || '').toLowerCase().includes(v.toLowerCase())},
   clr: {opts: [['none', 'No clearance asked'], ['ok', 'None, or can obtain'], ['hold', 'Must already hold'],

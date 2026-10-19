@@ -7,7 +7,7 @@ the resume, the letter, every answer the form was given, the screenshots. A
 job the person marked Applied by hand has no record, and says so.
 
 Stages are the person's: heard back, a recruiter screen, interviews, an offer,
-a rejection, withdrawn, no response -- each with a date and a note, kept in
+a rejection, the position closed, withdrawn, no response -- each with a date and a note, kept in
 data/apply/stages.json. The job's status follows the latest stage that changes
 it (an interview -> Interviewing, an offer -> Offer, a rejection -> Rejected),
 so the Jobs page agrees with this one.
@@ -33,6 +33,9 @@ STAGES = {
     "final": ("Final interview", "Interviewing"),
     "offer": ("Offer", "Offer"),
     "rejected": ("Rejected", "Rejected"),
+    # The employer closed or cancelled the role. Not a rejection, and not the posting's own
+    # "Closed": that one is the app's, for a job never applied to, and is undone if the posting returns.
+    "closed": ("Position closed", None),
     "withdrew": ("Withdrew", None),
     "no_response": ("No response", None),
 }
@@ -83,6 +86,12 @@ def _when(value) -> datetime | None:
         return None
 
 
+def closed_on(job) -> str | None:
+    """The day the posting was taken down, where you are -- None while it is up."""
+    when = None if job.is_open else _when(job.closed_at)
+    return when.astimezone().date().isoformat() if when else None
+
+
 def _current(job_status: str, events: list[dict]) -> str:
     """What to call where it stands: the latest stage, else the job's status."""
     if events:
@@ -102,11 +111,13 @@ def applications() -> list[dict]:
             record = audit.get(job.id)
             applied = _when(job.applied_at) or _when((record or {}).get("at"))
             events = sorted(stages.get(str(job.id), []), key=lambda e: e["at"])
-            days = (date.today() - applied.date()).days if applied else None
+            days = (date.today() - applied.astimezone().date()).days if applied else None   # the day it was, here
             out.append({"job_id": job.id, "company": job.company, "title": job.title, "status": job.status,
                         "applied_at": applied.isoformat() if applied else None, "days": days,
+                        "applied_on": applied.astimezone().date().isoformat() if applied else None,
                         "stage": _current(job.status, events), "stages": len(events),
-                        "through_app": record is not None, "open": bool(job.is_open)})
+                        "through_app": record is not None, "open": bool(job.is_open),
+                        "closed_on": closed_on(job)})
     out.sort(key=lambda a: a["applied_at"] or "", reverse=True)
     return out
 
@@ -123,26 +134,35 @@ def application(job_id: int) -> dict | None:
         applied = _when(job.applied_at) or _when((record or {}).get("at"))
         out = {"job_id": job.id, "company": job.company, "title": job.title, "location": job.location,
                "workplace": job.workplace, "status": job.status, "open": bool(job.is_open),
+               "closed_on": closed_on(job),
                "salary": [job.salary_min, job.salary_max] if job.salary_min or job.salary_max else None,
                "posting_url": (record or {}).get("url") or job.application_url, "source": job.source,
                "description": job.description or "", "applied_at": applied.isoformat() if applied else None}
     events = sorted(_stages().get(str(job_id), []), key=lambda e: e["at"])
     out["stages"] = [{**e, "label": STAGES.get(e["stage"], (e["stage"], None))[0]} for e in events]
     out["current"] = _current(out["status"], events)
-    out["days"] = (date.today() - applied.date()).days if applied else None
+    out["days"] = (date.today() - applied.astimezone().date()).days if applied else None
     out["record"] = None
     if record:
         folder = Path(record.get("evidence") or "")
         files = [f for f in EVIDENCE_FILES if folder.is_dir() and (folder / f).exists()]
         filled = record.get("filled") or {}
         out["record"] = {"how": record.get("how"), "resume_source": record.get("resume_source"),
+                         "confirmed_by_email": record.get("confirmed_by_email"),
                          "cover_letter": bool(record.get("cover_letter")),
-                         "answers": filled if isinstance(filled, dict) else {k: "" for k in filled},
+                         "answers": _readable(filled if isinstance(filled, dict) else {k: "" for k in filled}),
                          "files": files}
     last = events[-1]["stage"] if events else None
     out["follow_up"] = bool(out["days"] is not None and out["days"] >= FOLLOW_UP_DAYS
                             and last in (None, "no_response") and out["status"] == "Applied")
     return out
+
+
+def _readable(answers: dict) -> dict:
+    """The answers as the form asked them: a field's machine name ("resumator-phone-value") is left
+    out, and a one-word question ("Phone", "GPA") is kept -- it was hidden for having no space."""
+    import re
+    return {q: v for q, v in answers.items() if not re.fullmatch(r"[a-z0-9]+([-_][a-z0-9]+)+", str(q))}
 
 
 def evidence_file(job_id: int, name: str) -> Path | None:

@@ -66,10 +66,20 @@ def numbers_not_on(text: str, resume: str) -> list[str]:
 
 def draft(cfg, job, label: str, resume: str | None = None) -> dict:
     """{answer, gaps, unsupported_numbers} for one essay question on one job."""
+    from backend.apply import written
     from ml.resume.llm import complete, extract_json
     resume = resume if resume is not None else resume_text(cfg)
+    # The candidate's own earlier answers to questions like this one (backend/apply/written.py):
+    # their facts and their phrasing, to build on -- written by them, so as true as the resume.
+    earlier = written.similar(label)
+    material = "".join(
+        f"\n\nTHE CANDIDATE'S OWN EARLIER ANSWER (to {e['company'] or 'another employer'}), to the question "
+        f"\"{e['question'][:300]}\":\n{e['answer'][:4000]}" for e in earlier)
+    if material:
+        material += ("\n\nUse the earlier answers above as the candidate's own words: keep their facts and the "
+                     "phrasing that fits this question, answer THIS question, and never name the other employer.")
     user = (f"JOB: {job.title} at {job.company}\n\nPOSTING:\n{(job.description or '')[:9000]}\n\n"
-            f"CANDIDATE RESUME:\n{resume[:16000]}\n\nQUESTION:\n{label}")
+            f"CANDIDATE RESUME:\n{resume[:16000]}{material}\n\nQUESTION:\n{label}")
     reply = complete(SYSTEM, user, cfg, max_tokens=2000)
     body = extract_json(reply.text)
     answer = " ".join(str(body.get("answer") or "").split()) if "\n\n" not in str(body.get("answer") or "") \
@@ -77,8 +87,10 @@ def draft(cfg, job, label: str, resume: str | None = None) -> dict:
     if not answer:
         raise RuntimeError("The model returned no answer; try again.")
     return {"answer": answer, "gaps": [str(g) for g in body.get("gaps") or []][:6],
-            "unsupported_numbers": numbers_not_on(answer, resume),
-            "hedges": hedges(answer)}
+            # A number from the candidate's own earlier answer is theirs, as one on the resume is.
+            "unsupported_numbers": numbers_not_on(answer, resume + " " + " ".join(e["answer"] for e in earlier)),
+            "hedges": hedges(answer),
+            "from_earlier": [{"question": e["question"][:200], "company": e["company"]} for e in earlier]}
 
 
 HEDGE = re.compile(r"\b(my resume|the resume|i cannot|i can't|i do not have|i don't have|not documented|"

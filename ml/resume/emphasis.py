@@ -114,9 +114,12 @@ def spans(text: str, keywords: list[str], limit: int = PER_LINE,
             end += len(nxt.group(0))
         start = m.start()
         # ...and from its start: "Azure DevOps", not "Azure **DevOps**". A line's first word is no name's.
-        # A word that is a keyword of its own stays its own: "Azure" and "CI/CD", not "Azure CI/CD".
+        # A word that is a keyword of its own stays its own: "Azure" and "CI/CD", not "Azure CI/CD" --
+        # unless the term is one plain word, which is how a product name goes on ("Azure DevOps",
+        # "Azure Key Vault"). Without that, "Azure" already bold earlier in the job left "Azure **DevOps**".
+        plain = re.fullmatch(r"[A-Z][\w+#-]*", m.group(0)) is not None
         while (prev := re.search(r"(?<![\w/])([A-Z][\w+#-]*|[a-z]+[A-Z][\w+#-]*) $", text[:start])) \
-                and text[:prev.start(1)].strip(" \u2022-*\t") and prev.group(1).lower() not in own:
+                and text[:prev.start(1)].strip(" \u2022-*\t") and (plain or prev.group(1).lower() not in own):
             start = prev.start(1)
         terms_here = {term.lower()}
         # Overlapping another keyword's span: one phrase, "Azure DevOps".

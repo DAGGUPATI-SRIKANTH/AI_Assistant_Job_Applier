@@ -60,6 +60,104 @@ def packet_root(cfg) -> Path:
     return root if root.is_absolute() else PROJECT_ROOT / root
 
 
+# -- the name a file goes out under ------------------------------------------------------------
+
+def file_name(person: str, company: str, kind: str, suffix: str) -> str:
+    """"Jordan_Example_Resume_Acme.pdf": who, what, for whom -- the same in the job's folder and
+    on the employer's form. The company keeps its own capitals and drops "Inc."/"LLC"; anything
+    that is not a letter or a digit becomes one underscore, so the name survives every upload form."""
+    import re
+    clean = lambda text: re.sub(r"[^A-Za-z0-9]+", "_", text or "").strip("_")
+    firm = clean(company_label(company))
+    if len(firm) > 40:
+        firm = firm[:40].rsplit("_", 1)[0]
+    parts = [clean(person) or "Applicant", kind, firm]
+    return "_".join(p for p in parts if p) + suffix
+
+
+_SMALL = {"of", "and", "the", "for", "at", "in", "on", "de"}
+
+
+def company_label(company: str) -> str:
+    """A company as a person writes it: "ABBOTT POINT OF CARE INC. (AN ABBOTT COMPANY)" is
+    "Abbott Point of Care", "ACCENTURE LLP" is "Accenture", "2k games" is "2k Games". Names written
+    with their own capitals ("GitHub", "Hooli AI") are left as they are."""
+    import re
+    text = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", company or "")
+    suffix = re.compile(r"[,.]?\s*\b(inc|llc|llp|lp|ltd|limited|corp|corporation|co|plc|gmbh|l\.l\.c)\b\.?\s*$", re.I)
+    while suffix.search(text.strip()):
+        text = suffix.sub("", text.strip())
+    words = text.replace(",", " ").split()
+    if words and (text.isupper() or text.islower()):
+        def word(i, w):
+            if w.lower() in _SMALL and i:
+                return w.lower()
+            if text.isupper() and (len(w) <= 3 or re.search(r"[^A-Za-z]", w)):
+                return w                                # IBM, AI, AT&T
+            return w[:1].upper() + w[1:].lower()
+        words = [word(i, w) for i, w in enumerate(words)]
+    return " ".join(words)
+
+
+def person_name() -> str:
+    """The person's name as their profile gives it, or "" before there is a profile."""
+    try:
+        from backend.apply.profile import DEFAULT_PATH, load
+        return load(str(PROJECT_ROOT / DEFAULT_PATH)).full_name
+    except Exception:
+        return ""
+
+
+def company_in(directory: Path) -> str:
+    """The company a job folder is for, as its job.md names it ("## Acme")."""
+    try:
+        for line in (directory / JOB_SUMMARY).read_text(encoding="utf-8").splitlines()[:4]:
+            if line.startswith("## "):
+                return line[3:].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def resume_in(directory: Path, suffix: str = ".docx") -> Path | None:
+    """The folder's tailored resume: under the person's name, else the old "resume.docx"."""
+    if not directory or not directory.is_dir():
+        return None
+    named = sorted(directory.glob(f"*_Resume_*{suffix}")) + sorted(directory.glob(f"*_Resume{suffix}"))
+    return next((p for p in [*named, directory / f"resume{suffix}"] if p.exists()), None)
+
+
+def put_resume(directory: Path, docx: Path, pdf: Path | None = None, company: str | None = None) -> Path:
+    """Put a tailored resume in the job's folder under the person's name; the copy it replaces,
+    under any older name, is removed, so the folder holds one resume -- the one that is sent."""
+    import shutil
+    company = company_in(directory) if company is None else company
+    stem = file_name(person_name(), company, "Resume", "")
+    keep = {f"{stem}.docx", f"{stem}.pdf"}
+    for old in [*directory.glob("*_Resume*.docx"), *directory.glob("*_Resume*.pdf"),
+                directory / "resume.docx", directory / "resume.pdf"]:
+        if old.exists() and old.name not in keep:
+            old.unlink()
+    target = directory / f"{stem}.docx"
+    shutil.copy2(docx, target)
+    if pdf is not None and Path(pdf).exists():
+        shutil.copy2(pdf, directory / f"{stem}.pdf")
+    return target
+
+
+def name_resume(directory: Path, company: str | None = None) -> list[str]:
+    """Rename a folder's "resume.docx"/"resume.pdf" to the person's name; returns the new names."""
+    company = company_in(directory) if company is None else company
+    stem = file_name(person_name(), company, "Resume", "")
+    renamed = []
+    for suffix in (".docx", ".pdf"):
+        old, new = directory / f"resume{suffix}", directory / f"{stem}{suffix}"
+        if old.exists() and not new.exists():
+            old.rename(new)
+            renamed.append(new.name)
+    return renamed
+
+
 def packet_dir(cfg, company: str, title: str, external_id: str = "",
                job_id: int | None = None) -> Path:
     """One directory per posting, named the way the resume file already is.
@@ -159,25 +257,24 @@ def build_packet(cfg, job, letter_text: str | None = None) -> Packet:
     if letter_text:
         (directory / LETTER_FILE).write_text(letter_text, encoding="utf-8")
 
+    name_resume(directory, job.company)               # a folder from before files carried the person's name
+    held = resume_in(directory)
     packet = Packet(
         path=directory,
         job_id=job.id,
         company=job.company,
         title=job.title,
-        has_resume=(directory / RESUME_FILE).exists(),
+        has_resume=held is not None,
         has_letter=(directory / LETTER_FILE).exists(),
     )
 
-    # A resume tailored before packets existed sits beside the folder under the
-    # flat naming. Adopt it rather than making the user tailor again.
-    if not packet.has_resume:
-        legacy = packet_root(cfg) / output_filename(
-            job.company, job.title, job.external_id or ""
-        )
-        if legacy.exists():
-            (directory / RESUME_FILE).write_bytes(legacy.read_bytes())
-            if legacy.with_suffix(".pdf").exists():
-                (directory / "resume.pdf").write_bytes(legacy.with_suffix(".pdf").read_bytes())
+    # The tailored resume is written beside the folder under the posting's name (the one the job
+    # page and Auto-apply use). Bring it in when the folder has none, or an older one: the folder
+    # holds what is sent.
+    legacy = packet_root(cfg) / output_filename(job.company, job.title, job.external_id or "")
+    if legacy.exists() and (held is None or legacy.stat().st_mtime > held.stat().st_mtime + 1):
+        put_resume(directory, legacy, legacy.with_suffix(".pdf"), job.company)
+        if not packet.has_resume:
             packet.has_resume = True
             packet.notes.append(f"adopted the existing tailored resume ({legacy.name})")
             review = legacy.with_name(legacy.stem + "_review.txt")

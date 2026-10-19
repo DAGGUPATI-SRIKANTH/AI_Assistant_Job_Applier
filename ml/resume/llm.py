@@ -136,6 +136,8 @@ PROVIDERS = {
 # first call after a reboot can spend minutes just reading weights into memory.
 DEFAULT_TIMEOUT_S = 900
 CLAUDE_CODE_TIMEOUT_S = 360
+# The Claude model Claude Code is asked for: the alias the person's own Claude Code uses ("opus").
+DEFAULT_CLAUDE_CODE_MODEL = "opus"
 
 
 class ProviderUnavailable(RuntimeError):
@@ -202,6 +204,11 @@ def default_model_for(provider: str) -> str:
         return DEFAULT_ANTHROPIC_MODEL
     if provider == "ollama":
         return DEFAULT_OLLAMA_MODEL
+    if provider == "claude-code":
+        # Named, never left to Claude Code: without --model it uses the last model chosen on this
+        # Mac, and `ollama launch claude --model qwen3.5:9b` had made that an Ollama model -- every
+        # "Claude" call failed or hung six minutes, then fell back to slower ones (17 Oct 2026).
+        return DEFAULT_CLAUDE_CODE_MODEL
     return str(PROVIDERS.get(provider, {}).get("default_model", ""))
 
 

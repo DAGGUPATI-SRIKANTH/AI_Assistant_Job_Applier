@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import time
 import uuid
@@ -25,6 +26,9 @@ log = logging.getLogger(__name__)
 from backend.config.loader import PROJECT_ROOT
 
 RUNS = PROJECT_ROOT / "data" / "tailoring" / "runs"
+# The longest the finished resume waits for its skim test (advice, never a blocker).
+SKIM_WAIT_S = 120
+
 STAGES = ("reading documents", "extracting resume information", "identifying requirements",
           "matching evidence", "creating the draft", "checking the final files")
 
@@ -143,10 +147,8 @@ def run(folder: Path, resume_file: Path, jd_text: str = "", jd_file: Path | None
     tailored_text = read_document(rendered.docx).text
     skim, skim_note = {}, ""
     if use_model:
-        try:
-            skim = reviewing.skim_test(tailored_text, jd_text, cfg)
-        except Exception as exc:
-            skim_note = f"The skim test could not be made ({str(exc)[:100]})."
+        progress(STAGES[5], "a recruiter's six-second read of the finished resume")
+        skim, skim_note = skim_within(tailored_text, jd_text, cfg)
     from pypdf import PdfReader
     before_after = {
         "ats": [ats["before"], ats["after"]],
@@ -190,6 +192,28 @@ def run(folder: Path, resume_file: Path, jd_text: str = "", jd_file: Path | None
     }
     (folder / "result.json").write_text(json.dumps(result, indent=1, default=str))
     return result
+
+
+def skim_within(tailored_text: str, jd_text: str, cfg, wait_s: float | None = None) -> tuple[dict, str]:
+    """(skim, note): the six-second skim test of a finished resume, waited for a little, never long.
+
+    It is advice on a resume that is already made. A busy plan once timed out and fell back to a
+    slower model, and the bar stood at 99% for thirteen minutes while the resume sat finished.
+    """
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as StillRunning
+    from ml.tailoring import review as reviewing
+    wait_s = SKIM_WAIT_S if wait_s is None else wait_s
+    pool = ThreadPoolExecutor(max_workers=1)
+    pending = pool.submit(reviewing.skim_test, tailored_text, jd_text, cfg)
+    try:
+        return pending.result(timeout=wait_s), ""
+    except StillRunning:
+        return {}, (f"The six-second skim test was still running after {max(1, round(wait_s / 60))} minute(s), "
+                    "so the resume was finished without it.")
+    except Exception as exc:
+        return {}, f"The skim test could not be made ({str(exc)[:100]})."
+    finally:
+        pool.shutdown(wait=False)
 
 
 def _bullets(docx: Path) -> list[str]:
@@ -266,7 +290,35 @@ def _progress(folder: Path, **state) -> None:
     except (OSError, ValueError):
         current = {"stages": list(STAGES), "stage": 0, "done": False, "error": None, "note": ""}
     current.update(state)
+    current["pid"] = os.getpid()           # whose run this is, so a run that died can be told apart
     path.write_text(json.dumps(current))
+
+
+STALE_S = 30 * 60
+
+
+def interrupted(folder: Path, state: dict) -> bool:
+    """A run the page would wait on forever: not done, and its process is gone.
+
+    Runs go in a thread of the app (or of a daily job). Restarting the app ends the thread
+    mid-round and nothing writes "done", so the bar stood at its last step. A run from before
+    the pid was kept counts as gone after half an hour without a step.
+    """
+    if state.get("done"):
+        return False
+    pid = state.get("pid")
+    if pid:
+        try:
+            os.kill(int(pid), 0)
+            return False
+        except ProcessLookupError:
+            return True
+        except (PermissionError, ValueError, OSError):
+            return False
+    try:
+        return time.time() - (folder / "progress.json").stat().st_mtime > STALE_S
+    except OSError:
+        return False
 
 
 def start(folder: Path, resume_file: Path, jd_text: str, jd_file: Path | None, cfg,
@@ -602,8 +654,8 @@ def place_for_job(folder: Path, target_docx: Path, packet: Path | None = None) -
     shutil.copy2(folder / "tailored-resume.docx", target_docx)
     shutil.copy2(folder / "tailored-resume.pdf", target_docx.with_suffix(".pdf"))
     if packet is not None and packet.is_dir():
-        shutil.copy2(folder / "tailored-resume.docx", packet / "resume.docx")
-        shutil.copy2(folder / "tailored-resume.pdf", packet / "resume.pdf")
+        from ml.resume.packet import put_resume      # under the person's name: Jordan_Example_Resume_Acme
+        put_resume(packet, folder / "tailored-resume.docx", folder / "tailored-resume.pdf")
 
 
 def _job_record(job_id: int) -> dict:
@@ -622,6 +674,22 @@ def remember_job_run(job_id: int, folder: Path, target_docx: Path, packet: Path 
                                                  "packet": str(packet) if packet else None}))
 
 
+def source_of(folder: Path | None) -> str | None:
+    """What a run was tailored from -- the master with the lines added to it -- as a fingerprint
+    of its words, so two runs from the same resume match however the file was written."""
+    import hashlib
+    import re
+    from ml.tailoring.reader import read_document
+    files = sorted((folder / "inputs").glob("resume.*")) if folder else []
+    if not files:
+        return None
+    try:
+        text = read_document(files[0]).text
+    except Exception:
+        return None
+    return hashlib.sha1(re.sub(r"\s+", " ", text).strip().encode()).hexdigest()[:16]
+
+
 def finish_job_run(job_id: int, folder: Path, target_docx: Path, score: float,
                    packet: Path | None = None) -> bool:
     """Make this run the job's resume only if it matches at least as well as the best so far.
@@ -635,14 +703,56 @@ def finish_job_run(job_id: int, folder: Path, target_docx: Path, score: float,
     record = _job_record(job_id)
     best = record.get("best_score") if record.get("measure") == "ats" else None
     record["measure"] = "ats"
-    better = best is None or score >= best or not target_docx.exists()
+    # Scores compare only rewrites of the same resume. A best drawn from an older master -- one
+    # since corrected, or before a line was added to it -- loses to the newer one whatever it scored:
+    # an 82% rewrite of text read wrongly from a PDF ("Cloud Bui ld") kept beating a clean 80%.
+    source = source_of(folder)
+    best_folder = folder_of(record["best"]) if record.get("best") else None
+    best_source = record.get("best_source") or (source_of(best_folder) if best_folder else None)
+    newer_resume = bool(source and best_source and source != best_source)
+    better = best is None or score >= best or not target_docx.exists() or newer_resume
     if better:
         place_for_job(folder, target_docx, packet)
-        record.update(best=folder.name, best_score=score)
+        record.update(best=folder.name, best_score=score, best_source=source)
+        redo_done(job_id)
     record["run"] = folder.name
     JOBS.mkdir(parents=True, exist_ok=True)
     (JOBS / f"{job_id}.json").write_text(json.dumps(record))
     return better
+
+
+# Jobs whose tailored resume must be made again before it is sent, and why: {"11127": "made from…"}.
+# Beside JOBS, not in it: everything in JOBS is one job's record.
+REDO = PROJECT_ROOT / "data" / "tailoring" / "redo.json"
+
+
+def needs_redo(job_id: int) -> str | None:
+    """Why this job's tailored resume is to be made again before it goes out, or None."""
+    try:
+        reason = json.loads(REDO.read_text()).get(str(job_id))
+    except (OSError, ValueError, AttributeError):
+        return None
+    return str(reason) if reason else None
+
+
+def mark_redo(job_ids, reason: str) -> None:
+    """Set these jobs' tailored resumes to be made again when each is next tailored or applied to."""
+    try:
+        marked = json.loads(REDO.read_text())
+    except (OSError, ValueError):
+        marked = {}
+    marked.update({str(j): reason for j in job_ids})
+    REDO.parent.mkdir(parents=True, exist_ok=True)
+    REDO.write_text(json.dumps(marked, indent=1))
+
+
+def redo_done(job_id: int) -> None:
+    try:
+        marked = json.loads(REDO.read_text())
+    except (OSError, ValueError):
+        return
+    if marked.pop(str(job_id), None) is not None:
+        REDO.write_text(json.dumps(marked, indent=1))
 
 
 def job_run(job_id: int) -> str | None:

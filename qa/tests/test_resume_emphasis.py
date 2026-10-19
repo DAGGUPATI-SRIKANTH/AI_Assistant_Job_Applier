@@ -69,3 +69,13 @@ def test_skill_items_are_not_bold():
     runs = doc.paragraphs[-1].runs
     assert runs[0].bold and runs[0].text == "CI/CD & GitOps: "
     assert not any(r.bold for r in runs[1:])
+
+
+def test_a_product_name_stays_whole_when_its_first_word_was_bold_earlier():
+    """"Azure" bold earlier in the job left "Azure **DevOps**" -- half a product name in bold."""
+    from ml.resume.emphasis import spans
+    line = "Automated deployment pipelines using Azure DevOps, combining YAML templates."
+    assert [p for p, b in spans(line, ["devops", "azure"], used={"azure"}) if b] == ["Azure DevOps"]
+    # Two keywords side by side are still two: "Azure" and "CI/CD", not "Azure CI/CD".
+    assert [p for p, b in spans("Built pipelines on Azure CI/CD with Jenkins.", ["ci/cd", "azure"]) if b] \
+        == ["Azure", "CI/CD"]

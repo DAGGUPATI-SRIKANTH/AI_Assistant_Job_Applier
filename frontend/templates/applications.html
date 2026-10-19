@@ -17,6 +17,60 @@
   <div class="stat"><span class="k">Rejected</span><span class="v">{{ counts['Rejected'] }}</span><span class="note">&nbsp;</span></div>
 </section>
 
+<section class="card mail-card" id="email">
+  <div class="mail-card-head"><h2>Email updates</h2>
+    <button class="btn" type="button" id="mail-check">Check email now</button></div>
+  <p class="hint" id="mail-when">Your mailbox is read every half hour while the app runs: replies from companies you applied to
+    move each application on — a rejection, a closed position, an interview, an assessment, an offer — and an employer's
+    “thank you for applying” marks a job Applied. Read-only: nothing in your mailbox is changed.</p>
+  <div id="mail-items"></div>
+</section>
+<style>
+.mail-card{margin-bottom:14px}
+.mail-card-head{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.mail-card-head h2{margin:0}
+.mail-row{padding:7px 0;border-top:1px solid color-mix(in srgb,var(--line) 60%,transparent)}
+.mail-row:first-child{border-top:0}
+.mail-new{background:var(--signal-soft);color:var(--signal-ink);font-weight:600}
+</style>
+<script>
+(function () {
+  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+  const when = iso => iso ? new Date(iso).toLocaleString([], {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'}) : 'not yet';
+  let wait = null;
+  async function load() {
+    let d;
+    try { d = await (await fetch('/inbox/updates')).json(); } catch (e) { return; }
+    if (!d.ok) return;
+    const r = d.last_result || {};
+    document.getElementById('mail-when').textContent = !d.ready
+      ? 'No mailbox set up: add MAIL_ADDRESS and MAIL_APP_PASSWORD (a Google app password) to .env.'
+      : d.running ? 'Checking your email now…'
+      : `Last checked ${when(d.last_check)}` + (d.last_check ? ` — ${r.checked || 0} new message(s) read, ${r.updates || 0} update(s).` : '.')
+        + ' Read every half hour while the app runs; nothing in your mailbox is changed.';
+    const items = d.updates || [];
+    document.getElementById('mail-items').innerHTML = items.length ? items.slice(0, 30).map(u => `<div class="mail-row">
+        <b>${esc(u.label)}</b> · ${esc(u.company)}${u.title ? ' — ' + esc(u.title) : ''}
+        ${u.seen ? '' : '<span class="pill mail-new">New</span>'}
+        <div class="hint">${esc(u.change)} · ${esc((u.date || '').slice(0, 10))} · “${esc(u.subject)}” · from ${esc(u.from)}</div>
+        ${u.job_id ? `<a href="/applications/${u.job_id}">Open →</a>` : ''}</div>`).join('')
+      : '<p class="hint">No updates from email yet.</p>';
+    clearTimeout(wait);
+    if (d.running) wait = setTimeout(load, 3000);
+  }
+  document.getElementById('mail-check').addEventListener('click', async e => {
+    e.target.disabled = true;
+    try {
+      const r = await (await fetch('/inbox/check', {method: 'POST'})).json();
+      if (!r.ok) document.getElementById('mail-when').textContent = r.error;
+    } catch (err) {}
+    e.target.disabled = false;
+    setTimeout(load, 800);
+  });
+  load();
+})();
+</script>
+
 <section class="card">
   {% if items %}
   <div class="row" style="margin-bottom:8px">
@@ -31,9 +85,9 @@
   </tr></thead><tbody>
     {% for a in items %}
     <tr data-status="{{ a.status }}" data-text="{{ (a.company ~ ' ' ~ a.title)|lower }}">
-      <td class="hint">{{ a.applied_at[:10] if a.applied_at else '—' }}</td>
+      <td class="hint">{{ a.applied_on or '—' }}</td>
       <td><a href="{{ url_for('application_page', job_id=a.job_id) }}"><b>{{ a.title }}</b></a>
-        <div class="hint">{{ a.company }}{% if not a.open %} · posting closed{% endif %}</div></td>
+        <div class="hint">{{ a.company }}{% if a.closed_on %} · posting taken down {{ a.closed_on }}{% elif not a.open %} · posting closed{% endif %}</div></td>
       <td><span class="pill ap-{{ a.status|lower }}">{{ a.stage }}</span></td>
       <td class="num">{{ a.days if a.days is not none else '' }}</td>
       <td><a href="{{ url_for('application_page', job_id=a.job_id) }}">Open →</a></td>

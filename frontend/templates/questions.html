@@ -24,6 +24,53 @@
     waits for you to press Submit. Nothing is sent until you press <b>Start applying</b> on the Auto-apply page.</div>
 </section>
 
+<section class="card" aria-labelledby="written-title" id="written">
+  <div class="card-head"><h2 id="written-title">Your written answers</h2><span class="hint" id="written-count"></span></div>
+  <div class="sub">Experience questions you answered on applications, kept with the question, the company and the day.
+    When a later form asks something like one of them, the app's draft starts from your earlier answer — your
+    facts and your wording — and never names the other company. Long answers you type on a form are kept here
+    by themselves when you submit it.</div>
+  <div id="written-list"><p class="hint">Loading…</p></div>
+</section>
+<style>
+.wr-item{border-top:1px solid var(--hair);padding:10px 0}
+.wr-item:first-child{border-top:0}
+.wr-q{font-weight:600}
+.wr-a{white-space:pre-wrap;margin:8px 0;font-size:.95em}
+.wr-act{display:flex;gap:8px;flex-wrap:wrap}
+</style>
+<script>
+(function () {
+  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+  let items = [];
+  async function load() {
+    try { items = (await (await fetch('/apply/written.json')).json()).items || []; } catch (e) { items = []; }
+    document.getElementById('written-count').textContent = items.length ? `${items.length} kept` : '';
+    document.getElementById('written-list').innerHTML = items.length ? items.map((i, n) => `<div class="wr-item">
+        <div class="wr-q">${esc(i.question)}</div>
+        <div class="hint">${esc(i.company || '')}${i.title ? ' — ' + esc(i.title) : ''} · ${esc((i.date || '').slice(0, 10))}</div>
+        <details${n === 0 ? ' open' : ''}><summary>Your answer (${i.answer.split(/\s+/).length} words)</summary>
+          <div class="wr-a">${esc(i.answer)}</div></details>
+        <div class="wr-act"><button class="btn" type="button" data-copy="${n}">Copy</button>
+          <button class="btn" type="button" data-del="${esc(i.id)}">Delete</button></div></div>`).join('')
+      : '<p class="hint">None yet. Answers you write on application forms are kept here.</p>';
+  }
+  document.getElementById('written-list').addEventListener('click', async e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.copy) {
+      try { await navigator.clipboard.writeText(items[+b.dataset.copy].answer); b.textContent = 'Copied'; }
+      catch (err) { b.textContent = 'Select and copy it above'; }
+      setTimeout(() => { b.textContent = 'Copy'; }, 1500);
+    } else if (b.dataset.del && confirm('Delete this answer from your library?')) {
+      await fetch(`/apply/written/${encodeURIComponent(b.dataset.del)}/delete`, {method: 'POST'});
+      load();
+    }
+  });
+  load();
+})();
+</script>
+
 <section class="card" aria-labelledby="general-title">
   <div class="card-head"><h2 id="general-title">Answer once, used on every application</h2></div>
   <div class="sub">The same questions in each employer's own words, grouped. Save an answer and every application

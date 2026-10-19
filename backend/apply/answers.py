@@ -32,7 +32,10 @@ MAX_ANSWER_CHARS = 80
 # Filled from the profile or attached as files; never learned.
 _NOT_LEARNED = ("first name", "last name", "preferred first name", "email", "phone",
                 "resume", "cover letter", "attach", "enter manually", "linkedin",
-                "github", "website", "portfolio", "country", "location", "city", "state", "zip")
+                "github", "website", "portfolio", "country", "location", "city", "state", "zip",
+                # True for one form only: the day it was signed, the job it was for, a start date.
+                "date", "today", "signature date", "what full time job", "which position", "what position",
+                "when can you start", "start date")
 
 
 def normalise(label: str) -> str:

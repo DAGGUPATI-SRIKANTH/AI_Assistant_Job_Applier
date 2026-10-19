@@ -122,9 +122,10 @@ def test_the_summary_is_refreshed_on_a_rebuild(tmp_path):
     assert "$160K–$210K" in (again.path / JOB_SUMMARY).read_text()
 
 
-def test_a_resume_tailored_before_packets_existed_is_adopted(tmp_path):
+def test_a_resume_tailored_before_packets_existed_is_adopted(tmp_path, monkeypatch):
     # The flat naming predates packets; making someone tailor again to get a
     # folder would waste the work and, on the API path, the money.
+    monkeypatch.setattr("ml.resume.packet.person_name", lambda: "Jordan Example")
     cfg = Cfg(tmp_path)
     legacy = tmp_path / "clickup_gtm-devops-engineer_ec1b5de9.docx"
     legacy.write_bytes(b"PK\x03\x04 pretend docx")
@@ -135,7 +136,8 @@ def test_a_resume_tailored_before_packets_existed_is_adopted(tmp_path):
     packet = build_packet(cfg, FakeJob())
 
     assert packet.has_resume
-    assert (packet.path / RESUME_FILE).read_bytes() == b"PK\x03\x04 pretend docx"
+    # In the folder under the person's name, as it goes to the employer.
+    assert (packet.path / "Jordan_Example_Resume_ClickUp.docx").read_bytes() == b"PK\x03\x04 pretend docx"
     assert "rewrote three bullets" in (packet.path / "review.txt").read_text()
     assert any("adopted" in note for note in packet.notes)
 
@@ -179,3 +181,25 @@ def test_only_the_persons_own_folders_are_allowed(monkeypatch, tmp_path):
     assert webapp._usable_folder("relative/path")[1]
     ok, problem = webapp._usable_folder(str(tmp_path / "Job Applications"))
     assert problem is None and ok.is_dir()
+
+
+def test_a_folder_holds_one_resume_under_the_persons_name(tmp_path, monkeypatch):
+    """resume.docx from before the naming is renamed; a newer tailoring replaces it, never sits beside it."""
+    import os
+    from ml.resume.packet import put_resume, resume_in
+    monkeypatch.setattr("ml.resume.packet.person_name", lambda: "Jordan Example")
+    cfg = Cfg(tmp_path)
+    folder = build_packet(cfg, FakeJob()).path
+    (folder / "resume.docx").write_bytes(b"old"); (folder / "resume.pdf").write_bytes(b"old pdf")
+    build_packet(cfg, FakeJob())
+    assert sorted(p.name for p in folder.glob("*Resume*")) == ["Jordan_Example_Resume_ClickUp.docx",
+                                                              "Jordan_Example_Resume_ClickUp.pdf"]
+    assert not (folder / "resume.docx").exists()
+    newer = tmp_path / "tailored.docx"; newer.write_bytes(b"new")
+    put_resume(folder, newer)
+    assert resume_in(folder).read_bytes() == b"new" and len(list(folder.glob("*.docx"))) == 1
+    # A tailoring written beside the folder after it is brought in when the folder is next built.
+    flat = tmp_path / "clickup_gtm-devops-engineer_ec1b5de9.docx"
+    flat.write_bytes(b"newest"); later = folder.stat().st_mtime + 100; os.utime(flat, (later, later))
+    build_packet(cfg, FakeJob())
+    assert resume_in(folder).read_bytes() == b"newest"

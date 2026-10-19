@@ -176,6 +176,22 @@ def run_scrape(cfg) -> RunSummary:
     return summary
 
 
+def scrape_boards(cfg, refs: list[CompanyRef]) -> RunSummary:
+    """A few boards now, read exactly as the daily run reads them -- the same filter, the same
+    politeness, the same bookkeeping. A board just put on the watch list shows its openings in
+    minutes instead of after the next morning's run. One thread: these are a handful of boards."""
+    client = PoliteClient(HttpSettings.from_config(cfg))
+    scrapers = build_scrapers(cfg, client)
+    job_filter = resolve_filter(cfg)
+    summary = RunSummary(run_id=uuid.uuid4().hex[:12])
+    deactivate_after = int(cfg.get("limits.deactivate_after_failures", 5) or 0)
+    close_on_empty = bool(cfg.get("limits.close_on_empty_board", False))
+    lock = threading.Lock()
+    for ref in refs:
+        _scrape_one(ref, scrapers, job_filter, summary, lock, deactivate_after, close_on_empty)
+    return summary
+
+
 def _retry_deferred(summary, scrapers, client, job_filter, lock, deactivate_after, close_on_empty,
                     workers, max_wait: float = 20 * 60) -> None:
     """Ask the boards a host turned away once more, after its cool-off ends."""

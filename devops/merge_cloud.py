@@ -30,6 +30,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from data_engineering.db.models import CLOSED_STATUS, DEFAULT_STATUS, SYSTEM_STATUSES
+
 # Statuses that mean a person decided something. Never overwritten from a
 # cloud row, which has no idea any of it happened.
 USER_TOUCHED = ("Applied", "Interviewing", "Offer", "Rejected", "Closed",
@@ -60,17 +62,41 @@ def merge(cloud_path: Path, local_path: Path = Path("data/jobs.db"),
               and c != "id"]
 
     held = {}
-    for source, external, status in local.execute(
-            "SELECT source, external_id, status FROM jobs").fetchall():
-        held[(source, external)] = status
+    for source, external, status, is_open, seen, closed_at in local.execute(
+            "SELECT source, external_id, status, is_open, last_seen_at, closed_at FROM jobs").fetchall():
+        held[(source, external)] = (status, is_open, seen, closed_at)
 
-    added = refreshed = skipped = 0
+    added = refreshed = skipped = closed = reopened = 0
     for row in cloud.execute("SELECT * FROM jobs").fetchall():
         key = (row["source"], row["external_id"])
         if key in held:
             # Already here. The local row is the one with the history on it --
             # its score, its status, whether a packet was built. Touch only
-            # last_seen_at, so lifecycle does not decide it has vanished.
+            # last_seen_at, so lifecycle does not decide it has vanished --
+            # and whether it is still on the board, which on a morning the
+            # cloud did the fetch nothing else here would learn. That follows
+            # lifecycle's rules: only what the cloud saw after this Mac last
+            # did, and a person's status is never touched ("Applied" outlives
+            # the posting; only the app's own statuses become "Closed").
+            status, is_open, seen_here, closed_here = held[key]
+            if row["is_open"] == 0 and is_open and row["closed_at"] and (seen_here or "") < row["closed_at"]:
+                if not dry_run:
+                    local.execute(
+                        "UPDATE jobs SET is_open = 0, closed_at = ?, status = ?, exported_to_excel = 0 "
+                        "WHERE source = ? AND external_id = ?",
+                        (row["closed_at"], CLOSED_STATUS if (status or "") in SYSTEM_STATUSES else status,
+                         row["source"], row["external_id"]))
+                closed += 1
+                continue
+            if row["is_open"] and not is_open and closed_here and (row["last_seen_at"] or "") > closed_here:
+                if not dry_run:
+                    local.execute(
+                        "UPDATE jobs SET is_open = 1, closed_at = NULL, last_seen_at = ?, status = ?, "
+                        "exported_to_excel = 0 WHERE source = ? AND external_id = ?",
+                        (row["last_seen_at"], DEFAULT_STATUS if status == CLOSED_STATUS else status,
+                         row["source"], row["external_id"]))
+                reopened += 1
+                continue
             if not dry_run:
                 local.execute(
                     "UPDATE jobs SET last_seen_at = ? WHERE source = ? AND external_id = ?",
@@ -110,7 +136,7 @@ def merge(cloud_path: Path, local_path: Path = Path("data/jobs.db"),
     local.close()
 
     return {"added": added, "refreshed": refreshed, "skipped": skipped,
-            "boards_added": boards_added}
+            "closed": closed, "reopened": reopened, "boards_added": boards_added}
 
 
 def run(argv: list[str]) -> int:
@@ -124,6 +150,8 @@ def run(argv: list[str]) -> int:
     verb = "would add" if args.dry_run else "added"
     print(f"  {verb} {result['added']} new postings")
     print(f"  refreshed {result['refreshed']} already held")
+    if result["closed"] or result["reopened"]:
+        print(f"  {result['closed']} taken down from their boards, {result['reopened']} back up")
     if result["boards_added"]:
         print(f"  {verb} {result['boards_added']} boards")
     print("  nothing local was replaced — statuses, probe memory and job-alert "

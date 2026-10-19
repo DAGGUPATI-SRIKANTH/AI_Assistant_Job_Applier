@@ -150,6 +150,7 @@ def test_the_tailor_page_takes_a_job(client):
 def test_a_run_from_a_job_page_uses_the_saved_resume(client, monkeypatch, tmp_path):
     saved = sample_resume(tmp_path / "base_resume.docx")
     monkeypatch.setattr("ml.resume.pipeline.base_resume_path", lambda cfg: saved)
+    monkeypatch.setattr("ml.resume.additions.ADDITIONS_PATH", tmp_path / "none.yaml")   # not the person's own lines
     reply = client.post("/tailor/start", data={"jd_text": JD, "use_saved": "1"},
                         content_type="multipart/form-data")
     assert reply.get_json()["ok"], reply.get_json()

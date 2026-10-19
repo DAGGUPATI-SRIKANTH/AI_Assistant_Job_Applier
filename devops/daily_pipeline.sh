@@ -13,7 +13,8 @@
 
 set -uo pipefail
 
-PROJECT="/Volumes/Storage/D Drive /Rep/AI_Assistant_Job_Applier"
+# PIPELINE_PROJECT exists for the tests (qa/tests/test_daily_pipeline_sh.py); launchd never sets it.
+PROJECT="${PIPELINE_PROJECT:-/Volumes/Storage/D Drive /Rep/AI_Assistant_Job_Applier}"
 PY="$PROJECT/.venv/bin/python"
 
 # Hold the Mac awake for the length of the run.
@@ -45,26 +46,73 @@ mkdir -p "$PROJECT/data"
 
 log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG"; }
 
+# The 6 AM start can be switched off on the Jobs page (data/daily_auto_off). The
+# scheduled tick then does nothing, and the run happens only when Start on that
+# page is pressed -- which sets MANUAL=1 and runs whatever the switch says.
+if [ "$TASK" = "daily" ] && [ "${MANUAL:-0}" != "1" ] && [ -f "$PROJECT/data/daily_auto_off" ]; then
+  log "daily: the 6 AM start is switched off on the Jobs page — not starting"
+  echo '{"ok":true,"skipped":"switched off"}'
+  exit 0
+fi
+
 # mkdir is the atomic primitive here: macOS has no flock, and a lock FILE can
 # be left behind by a kill -9 with no way to tell it from a live run.
+PIDFILE="$PROJECT/data/${TASK}.pid"
+# Whether the run holding the lock is alive: its pid, still running this script.
+owner_alive() {
+  local owner
+  owner="$(cat "$PIDFILE" 2>/dev/null)"
+  [ -n "$owner" ] && ps -p "$owner" -o command= 2>/dev/null | grep -q "daily_pipeline.sh"
+}
 if ! mkdir "$LOCK" 2>/dev/null; then
-  if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +$((STALE_HOURS * 60)) 2>/dev/null)" ]; then
-    log "breaking a lock older than ${STALE_HOURS}h"
-    rmdir "$LOCK" 2>/dev/null
-    mkdir "$LOCK" 2>/dev/null || { echo '{"ok":false,"error":"locked"}'; exit 0; }
-  else
+  # A lock whose run is alive is kept however old it is: a scheduled run can wait
+  # hours for the lid to open, and breaking its lock would start a second run. One
+  # whose run is gone (killed, or stopped from the Jobs page, neither of which runs
+  # the trap below) is cleared at once instead of costing the next morning's run.
+  # No pid file at all is a run from before pids were kept: the old 6-hour rule.
+  if owner_alive || { [ ! -f "$PIDFILE" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin +$((STALE_HOURS * 60)) 2>/dev/null)" ]; }; then
     log "$TASK already running — skipping this tick"
     echo '{"ok":true,"skipped":"already running"}'
     exit 0
   fi
+  log "clearing a lock its run left behind"
+  rmdir "$LOCK" 2>/dev/null
+  mkdir "$LOCK" 2>/dev/null || { echo '{"ok":false,"error":"locked"}'; exit 0; }
 fi
-trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+echo $$ > "$PIDFILE"
+trap 'rmdir "$LOCK" 2>/dev/null; rm -f "$PIDFILE"' EXIT
 
 SUMMARY=""
 log "=== $TASK starting ==="
+
+# Wait for the Mac to be open before a scheduled run starts.
+#
+# launchd fires the 6 AM tick even in a Power Nap wake with the lid shut, and on
+# battery caffeinate cannot hold the Mac awake: on 18 Oct the run started at 06:02
+# in such a wake and crept along a few boards per wake-up for four hours, until the
+# lid opened at 10:07. A Power Nap wake has no graphics ("CPU Disk Network"); a real
+# one does ("CPU Graphics Audio Network"), lid open or on an external display. So a
+# scheduled run waits for graphics, holding its lock, and starts within a minute of
+# the lid opening. A run started from the Jobs page needs no waiting: someone is there.
+CLOUD_FLAG=""
+if [ "$TASK" = "daily" ]; then
+  # A scheduled morning takes the GitHub run's postings when that has read the boards (laptop shut
+  # or off), and reads them here when it has not (devops/cloud_results.py). Start now reads them here.
+  [ "${MANUAL:-0}" = "1" ] || CLOUD_FLAG="--cloud"
+  if [ "${CATCH_UP:-0}" = "1" ]; then
+    log "started when the Mac came on — the 6 AM start had not run (the Mac was off)"
+  fi
+  if [ "${MANUAL:-0}" = "1" ]; then
+    log "started from the Jobs page"
+  elif command -v pmset >/dev/null 2>&1 && ! pmset -g systemstate 2>/dev/null | grep -q "Graphics"; then
+    log "waiting for the Mac to be opened — it is asleep with the lid shut"
+    until pmset -g systemstate 2>/dev/null | grep -q "Graphics"; do sleep "${WAKE_POLL:-60}"; done
+    log "the Mac is open — starting"
+  fi
+fi
 case "$TASK" in
   daily)
-    $CAFFEINATE "$PY" -u main.py daily >> "$LOG" 2>&1
+    $CAFFEINATE "$PY" -u main.py daily $CLOUD_FLAG >> "$LOG" 2>&1
     # Capture the run's own exit code HERE. `STATUS=$?` below sits after the
     # case block, so anything added under it silently becomes what gets
     # reported -- the export succeeding would have masked a failed scrape.
@@ -74,6 +122,8 @@ case "$TASK" in
     # the cloud keeps scraping a months-old list. Exporting costs a second,
     # and its own success is not the pipeline's success.
     "$PY" -m data_engineering.boards export >> "$LOG" 2>&1 || log "board export failed (not fatal)"
+    # The GitHub run reads the same list, encrypted: sent only when it changed.
+    "$PY" -m devops.cloud_results push-boards >> "$LOG" 2>&1 || log "board list not sent to the cloud (not fatal)"
     # Ready-made "skills this job wants" for the best jobs, so the job page
     # opens with them. Uses the writing model; a failure is not the pipeline's.
     $CAFFEINATE "$PY" -u main.py suggest --top 10 >> "$LOG" 2>&1 || log "suggestions failed (not fatal)"

@@ -47,3 +47,10 @@ def _no_real_general_answers(monkeypatch, tmp_path):
     from backend.apply import general
     monkeypatch.setattr(general, "STORE", tmp_path / "general_answers.yaml")
     monkeypatch.setattr(general, "past_employers", lambda: ())
+
+
+@pytest.fixture(autouse=True)
+def _no_real_written_answers(monkeypatch, tmp_path):
+    """The person's written answers are never drafted from, or added to, by tests."""
+    from backend.apply import written
+    monkeypatch.setattr(written, "PATH", tmp_path / "written_answers.json")

@@ -26,6 +26,20 @@ from pathlib import Path
 
 DEFAULT_PATH = "backend/config/applicant.yaml"
 
+
+def start_after(notice, today=None) -> str | None:
+    """The first day after a notice period, as forms write dates: "2 weeks" -> 14 days from today.
+
+    Worked out on the day of each form, so a start date typed for one application never goes
+    stale on the next. None when the notice says no number of days, weeks or months.
+    """
+    from datetime import date, timedelta
+    m = re.search(r"(\d+)\s*(day|week|month)", str(notice or "").lower())
+    if not m:
+        return None
+    days = int(m.group(1)) * {"day": 1, "week": 7, "month": 30}[m.group(2)]
+    return ((today or date.today()) + timedelta(days=days)).strftime("%m/%d/%Y")
+
 # Questions no automation may answer from a template, however it is phrased.
 # Matched loosely against a form's own label text.
 DECLARATION_PATTERNS = (
@@ -226,8 +240,9 @@ class Applicant:
             return str(self.employment.get("notice_period") or "").strip() or None
         if "desired salary" in text or "salary expectation" in text:
             return str(self.employment.get("desired_salary") or "").strip() or None
-        if "start date" in text or "available to start" in text:
-            return str(self.employment.get("earliest_start_date") or "").strip() or None
+        if "start date" in text or "available to start" in text or re.search(r"\bwhen can you start\b", text):
+            return str(self.employment.get("earliest_start_date") or "").strip() or start_after(
+                self.employment.get("notice_period"))
         if "relocate" in text:
             willing = self.employment.get("willing_to_relocate")
             return None if willing is None else ("Yes" if willing else "No")

@@ -79,6 +79,10 @@ def _env() -> dict[str, str]:
     extra = [str(Path.home() / ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin",
              str(Path.home() / ".npm-global/bin")]
     env["PATH"] = os.pathsep.join(dict.fromkeys(extra + env.get("PATH", "/usr/bin:/bin").split(os.pathsep)))
+    # The Gemini CLI now refuses to run outside a folder it was told to trust ("CLI is not running
+    # in a trusted directory"): every call failed in two seconds and fell through to the slowest
+    # backup. The folder is the app's own empty working one (WORKDIR), with no tools given.
+    env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
     return env
 
 

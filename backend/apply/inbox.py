@@ -81,13 +81,12 @@ _TECH = re.compile(r"technical (interview|screen|round)|system design|coding int
 
 # -- who a message is from -------------------------------------------------------------------------
 #
-# Anyone can put "Acme" in a sender's name, and "x@acme.attacker.com" begins with "acme". So mail
-# moves an application only when Gmail found it really came from its domain, and that domain is the
-# employer's own or a hiring system that sends employers' mail. "Found" is read from the one header
-# Gmail itself adds -- the topmost Authentication-Results, from mx.google.com -- never from one a
-# sender could have written into the message; and the sender is a single, well-formed address, the
-# same one Gmail checked ("no-reply@hire.lever.co <x@attacker.example>" is read differently by
-# different parsers, and is refused).
+# Anyone can put "Acme" in a sender's name, "x@acme.attacker.com" begins with "acme", and any line in
+# a message's header -- an "Authentication-Results: ... dmarc=pass" among them -- is the sender's to
+# write. So nothing in the header is taken on trust. Mail moves an application only when it carries a
+# DKIM signature that verifies here, against the key its domain publishes in DNS, made by the very
+# domain it is from and covering its From and To lines; when it was addressed to you; and when that
+# domain is the employer's own or a hiring system that sends employers' mail.
 HIRING_DOMAINS = frozenset({
     "greenhouse.io", "greenhouse-mail.io", "lever.co", "ashbyhq.com", "myworkday.com", "myworkdayjobs.com",
     "workday.com", "applytojob.com", "jazzhr.com", "icims.com", "smartrecruiters.com", "workablemail.com",
@@ -100,7 +99,6 @@ HIRING_DOMAINS = frozenset({
 FREE_MAIL = frozenset({"gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com",
                        "yahoo.com", "ymail.com", "icloud.com", "me.com", "aol.com", "proton.me",
                        "protonmail.com", "gmx.com", "mail.com", "zoho.com", "yandex.com", "fastmail.com"})
-GMAIL_AUTHSERV = "mx.google.com"
 _SECOND_LEVEL = {"co", "com", "org", "net", "ac", "gov", "edu"}
 
 
@@ -143,16 +141,6 @@ def recipients(msg) -> list[str]:
     return out
 
 
-def signatures(msg) -> list[tuple[str, list[str]]]:
-    """Each DKIM signature's domain and the headers it covers."""
-    out = []
-    for sig in msg.get_all("DKIM-Signature") or []:
-        tags = dict(re.findall(r"(?:^|;)\s*([a-z]+)\s*=\s*([^;]*)", " ".join(str(sig).split()), re.I))
-        out.append((tags.get("d", "").strip().lower(),
-                    [h.strip().lower() for h in tags.get("h", "").split(":") if h.strip()]))
-    return out
-
-
 def mailbox_key(address: str) -> str:
     """One address however it is written: Gmail ignores dots and "+anything" in the name."""
     local, _, domain = (address or "").lower().partition("@")
@@ -161,45 +149,73 @@ def mailbox_key(address: str) -> str:
     return f"{local}@{domain}"
 
 
-def auth_results(header: str) -> tuple[str, list[tuple[str, str, dict]]]:
-    """An Authentication-Results header read: (who wrote it, [(method, result, properties)]).
-    Quoted strings and comments are dropped first: the envelope sender Gmail quotes there is the
-    sender's to write, and a ";" in it must not start a result of its own."""
-    text = re.sub(r'"(?:[^"\\]|\\.)*"', '""', header or "")
-    text = re.sub(r"\([^()]*\)", " ", text)
-    parts = [part.strip() for part in text.split(";")]
-    authserv = parts[0].split()[0].lower() if parts and parts[0].split() else ""
-    out = []
-    for part in parts[1:]:
-        found = re.match(r"([a-z0-9-]+)\s*=\s*([a-z]+)\b(.*)$", part, re.I | re.S)
-        if found:
-            props = {k.lower(): v.lower() for k, v in re.findall(r"([a-z0-9.-]+)=(\S+)", found.group(3), re.I)}
-            out.append((found.group(1).lower(), found.group(2).lower(), props))
-    return authserv, out
+_DKIM_CLOCK = threading.Lock()
+DKIM_DNS = None                       # how a signing key is looked up: None is DNS itself (tests give their own)
 
 
-def verified(address: str, auth: str, signed: list[tuple[str, list[str]]] | None = None) -> str | None:
-    """The sender's domain (registrable) when Gmail's own DMARC check says the message came from it.
+class _At:
+    """dkimpy asks its module's `time` what time it is: this answers with the moment a message
+    arrived, and passes everything else to the real module."""
 
-    DMARC, not a DKIM signature alone: it is Gmail's judgement that the From domain itself sent
-    it. One DMARC result only -- two means one was written by someone else. And a message signed
-    by that domain can be sent on by whoever received it, so where the signature that passed does
-    not cover its To line, the To line proves nothing and the message is not taken."""
+    def __init__(self, moment: float):
+        self.moment = moment
+
+    def time(self) -> float:
+        return self.moment
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def dkim_signers(raw: bytes, dnsfunc=None, at: float | None = None) -> list[tuple[str, set[str]]]:
+    """Each DKIM signature on a message that verifies here, against the key its domain publishes:
+    (domain, the headers it covers). One limited to part of the body (l=) is left out -- whatever
+    follows that length is anyone's text -- and so is one that cannot be checked at all.
+
+    `at`: when Gmail received the message. Signatures expire (Lever's after two hours, JazzHR's
+    after two days), and one valid when the message arrived proves who sent it as well later; a
+    copy sent on after the expiry arrives after it, and fails."""
+    import dkim
+    out: list[tuple[str, set[str]]] = []
+    try:
+        checker = dkim.DKIM(raw, minkey=1024, timeout=10)
+        count = sum(1 for name, _ in checker.headers if name.lower() == b"dkim-signature")
+    except Exception:
+        return out
+    with _DKIM_CLOCK:
+        real = dkim.time
+        if at is not None:
+            dkim.time = _At(at)
+        try:
+            for idx in range(min(count, 6)):
+                try:
+                    prep = checker.verify_headerprep(idx)
+                    if not prep or b"l" in prep[0]:
+                        continue
+                    sig = prep[0]
+                    lookup = dnsfunc or DKIM_DNS
+                    ok = checker.verify(idx=idx, dnsfunc=lookup) if lookup else checker.verify(idx=idx)
+                except Exception:         # a malformed or expired signature, a key not found, DNS down
+                    continue
+                if ok:
+                    covers = {h.strip().lower() for h in sig.get(b"h", b"").decode(errors="replace").split(":")}
+                    out.append((sig.get(b"d", b"").decode(errors="replace").strip().lower(), covers))
+        finally:
+            dkim.time = real
+    return out
+
+
+def verified(address: str, raw: bytes, dnsfunc=None, at: float | None = None) -> str | None:
+    """The sender's domain (registrable) when the message proves it sent it: a DKIM signature by
+    that same domain, verified here, covering the From line and the To line (signed for whom it
+    says, so someone else's mail sent on cannot pass as yours)."""
     org = registrable((address or "").rpartition("@")[2])
-    authserv, results = auth_results(auth)
-    if not org or authserv != GMAIL_AUTHSERV:
+    if not org or not raw:
         return None
-    dmarc = [(result, props) for method, result, props in results if method == "dmarc"]
-    if len(dmarc) != 1 or dmarc[0][0] != "pass" or registrable(dmarc[0][1].get("header.from", "")) != org:
-        return None
-    if signed is not None:
-        aligned = [covers for domain, covers in signed if registrable(domain) == org]
-        passed = any(method == "dkim" and result == "pass"
-                     and registrable((props.get("header.d") or props.get("header.i") or "").lstrip("@")) == org
-                     for method, result, props in results)
-        if passed and not any("to" in covers for covers in aligned):
-            return None
-    return org
+    for domain, covers in dkim_signers(raw, dnsfunc, at):
+        if registrable(domain) == org and {"from", "to"} <= covers:
+            return org
+    return None
 
 
 def _own_domain(org: str, names) -> bool:
@@ -404,20 +420,18 @@ def _headers(connection, uids: list[bytes]) -> list[dict]:
     for start in range(0, len(uids), 100):
         batch = b",".join(uids[start:start + 100]).decode()
         typ, data = connection.uid("FETCH", batch,
-                                   "(BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID "
-                                   "AUTHENTICATION-RESULTS DKIM-SIGNATURE)])")
+                                   "(INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID)])")
         for part in data or []:
             if not isinstance(part, tuple):
                 continue
             uid = re.search(rb"UID (\d+)", part[0])
             msg = email.message_from_bytes(part[1], policy=email.policy.default)
-            results = msg.get_all("Authentication-Results") or []
             address, name = sender(msg)
+            arrived = imaplib.Internaldate2tuple(part[0])      # set by Gmail when it took the message in
             out.append({"uid": uid.group(1) if uid else None, "from": _text(msg["From"]),
-                        "address": address, "name": name, "to": recipients(msg), "signed": signatures(msg),
+                        "arrived": time.mktime(arrived) if arrived else None,
+                        "address": address, "name": name, "to": recipients(msg),
                         "subject": _text(msg["Subject"]), "date": _when(msg["Date"]),
-                        # Only the topmost: the one Gmail adds above everything the sender wrote.
-                        "auth": str(results[0]) if results else "",
                         "id": _text(msg["Message-ID"]) or f"uid:{uid.group(1).decode() if uid else ''}"})
     return out
 
@@ -437,13 +451,12 @@ class Box:
             pass
         self.conn = _connect(*self.creds)
 
-    def body(self, uid: bytes) -> str:
-        from data_engineering.scraper.mailbox import _body_text
+    def raw(self, uid: bytes) -> bytes:
+        """The message as it arrived, every byte: what a DKIM signature is checked against."""
         for attempt in range(3):
             try:
                 typ, data = self.conn.uid("FETCH", uid, "(BODY.PEEK[])")
-                raw = next((p[1] for p in data or [] if isinstance(p, tuple)), b"")
-                return _body_text(email.message_from_bytes(raw, policy=email.policy.default))[:20000]
+                return next((p[1] for p in data or [] if isinstance(p, tuple)), b"")
             except (TimeoutError, OSError, imaplib.IMAP4.abort, imaplib.IMAP4.error) as exc:
                 log.debug("Reading a message failed (%s); opening the mailbox again", exc)
                 time.sleep(1 + attempt)
@@ -451,13 +464,24 @@ class Box:
                     self.reopen()
                 except Exception:
                     pass
-        return ""
+        return b""
+
+    def body(self, uid: bytes) -> str:
+        return text_of(self.raw(uid))
 
     def close(self) -> None:
         try:
             self.conn.logout()
         except Exception:
             pass
+
+
+def text_of(raw: bytes) -> str:
+    """A message's readable text, from the message as it arrived."""
+    from data_engineering.scraper.mailbox import _body_text
+    if not raw:
+        return ""
+    return _body_text(email.message_from_bytes(raw, policy=email.policy.default))[:20000]
 
 
 def _text(value) -> str:
@@ -629,18 +653,20 @@ def _check(days: int | None, say, dry_run: bool = False, again: bool = False) ->
             if _NOISE.search(head["subject"]):
                 continue
             address, name = head.get("address", ""), head.get("name", "")
-            org = verified(address, head.get("auth", ""), head.get("signed") or [])
-            if org is None:
-                continue                   # not provably from where it says: never moves an application
-            if not any(mailbox_key(a) in mine for a in head.get("to") or []):
-                continue                   # someone else's mail, sent on: not news about your applications
+            if not address or not any(mailbox_key(a) in mine for a in head.get("to") or []):
+                continue                   # no plain sender, or someone else's mail sent on
+            org = registrable(address.rpartition("@")[2])
+            if org in FREE_MAIL:
+                continue
             target = match(head["from"], head["subject"], "", among, head["date"], address=address, name=name)
-            body = ""
+            if target is None and org not in HIRING_DOMAINS:
+                continue                   # names nothing of yours: not worth fetching
+            raw = box.raw(head["uid"])
+            if verified(address, raw, at=head.get("arrived")) is None:
+                continue                   # not provably from where it says: never moves an application
+            body = text_of(raw)
             if target is None:
                 # The company may be named only in the text (a hiring system's own sender name).
-                if org not in HIRING_DOMAINS:
-                    continue
-                body = box.body(head["uid"])
                 target = match(head["from"], head["subject"], body, among, head["date"], address=address, name=name)
                 if target is None and classify(head["subject"], body) == "confirmation":
                     target = lookup_job(head["from"], head["subject"], body, address=address, name=name)
@@ -650,7 +676,6 @@ def _check(days: int | None, say, dry_run: bool = False, again: bool = False) ->
                 if target is None:
                     continue
             matched += 1
-            body = body or box.body(head["uid"])
             kind = classify(head["subject"], body)
             if kind is None:
                 continue

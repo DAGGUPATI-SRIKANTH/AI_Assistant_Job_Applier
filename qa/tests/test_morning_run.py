@@ -108,7 +108,7 @@ def test_start_runs_the_script_by_hand_even_with_the_6am_start_off(controls, mon
     (data / "daily.lock").mkdir()                   # left by a run that was killed
     assert client.post("/run/morning/auto", json={"on": False}).get_json()["auto"] is False
     assert client.post("/run/morning/start").get_json() == {"ok": True, "started": True}
-    assert started["args"] == ["/bin/bash", str(morning_pages.SCRIPT), "daily"]
+    assert started["args"] == [morning_pages.BASH, str(morning_pages.SCRIPT), "daily"]
     assert started["env"]["MANUAL"] == "1" and started["start_new_session"] is True
     assert not (data / "daily.lock").exists()
 

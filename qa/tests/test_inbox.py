@@ -13,6 +13,8 @@ NOW = datetime.now(timezone.utc)
 # What Gmail adds to mail that really came from Lever's hiring system.
 LEVER_AUTH = ("mx.google.com; dkim=pass header.i=@hire.lever.co header.s=k1 header.b=abc; spf=pass "
               "smtp.mailfrom=no-reply@hire.lever.co; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=hire.lever.co")
+# Lever's signature, covering the To line, as on Lever's real mail.
+LEVER_SIGNED = [("hire.lever.co", ["from", "to", "subject", "date"])]
 
 
 @pytest.fixture
@@ -23,6 +25,7 @@ def db(monkeypatch, tmp_path):
     monkeypatch.setattr(inbox, "UPDATES", tmp_path / "updates.json")
     monkeypatch.setattr(inbox, "STATE", tmp_path / "state.json")
     monkeypatch.setattr("backend.apply.anyform.UNCONFIRMED", tmp_path / "unconfirmed.json")
+    monkeypatch.setattr(inbox, "_applicant_email", lambda: "")      # never the real profile
     naive = lambda d: d.replace(tzinfo=None)
     with get_session() as s:
         s.add(Job(id=1, source="ashby", company="Initech", company_slug="initech", external_id="1", content_hash="a",
@@ -122,10 +125,11 @@ def test_a_receipt_and_the_rejection_after_it_in_one_look(db, monkeypatch):
     sent = NOW - timedelta(days=4)
     mail = [
         {"uid": b"1", "id": "z1", "from": "Hooli AI <no-reply@hire.lever.co>", "date": sent, "auth": LEVER_AUTH,
-         "address": "no-reply@hire.lever.co", "subject": "Thank you for your application to Hooli AI"},
+         "address": "no-reply@hire.lever.co", "name": "Hooli AI", "to": ["me@example.com"], "signed": LEVER_SIGNED,
+         "subject": "Thank you for your application to Hooli AI"},
         {"uid": b"2", "id": "z2", "from": "Hooli AI <no-reply@hire.lever.co>", "date": sent + timedelta(days=3),
-         "auth": LEVER_AUTH, "address": "no-reply@hire.lever.co",
-         "subject": "Your Hooli AI Application: Staff Platform Engineer"},
+         "auth": LEVER_AUTH, "address": "no-reply@hire.lever.co", "name": "Hooli AI", "to": ["me@example.com"],
+         "signed": LEVER_SIGNED, "subject": "Your Hooli AI Application: Staff Platform Engineer"},
     ]
     texts = {b"1": "We received your application for Staff Platform Engineer (R1002), and we are delighted.",
              b"2": "For the Staff Platform Engineer (R1002) role, we have identified other candidates and will not "
@@ -240,6 +244,7 @@ def test_platforms_anyone_can_send_through_and_free_mailboxes_speak_for_no_emplo
 def test_unauthenticated_mail_never_moves_an_application(db, monkeypatch):
     spoof = [{"uid": b"9", "id": "s1", "from": "Globex <no-reply@applytojob.com>", "date": NOW - timedelta(hours=2),
               "auth": "mx.google.com; spf=fail; dmarc=fail header.from=applytojob.com", "address": "no-reply@applytojob.com",
+              "name": "Globex", "to": ["me@example.com"], "signed": [],
               "subject": "Your Application with Globex"}]
 
     class FakeBox:
@@ -253,3 +258,42 @@ def test_unauthenticated_mail_never_moves_an_application(db, monkeypatch):
     monkeypatch.setattr(inbox, "credentials", lambda: ("me@example.com", "pw"))
     monkeypatch.setattr(inbox, "_notify", lambda found: None)
     assert inbox.check(days=2)["updates"] == [] and tracker.application(2)["stages"] == []
+
+
+def test_one_dmarc_result_from_gmail_and_a_signature_that_covers_who_it_was_for():
+    two = "mx.google.com; dmarc=fail header.from=globex.com; dmarc=pass header.from=globex.com"
+    assert inbox.verified("hr@globex.com", two) is None                          # one was written by someone else
+    assert inbox.verified("hr@globex.com", "mx.google.com; dkim=pass header.d=globex.com") is None   # DKIM alone
+    signed = "mx.google.com; dkim=pass header.d=globex.com; dmarc=pass header.from=globex.com"
+    assert inbox.verified("hr@globex.com", signed, [("globex.com", ["from", "subject"])]) is None   # To not signed
+    assert inbox.verified("hr@globex.com", signed, [("globex.com", ["from", "to", "subject"])]) == "globex.com"
+
+
+def test_one_strict_reading_of_the_sender_and_one_mailbox_however_written():
+    raw = b'From: "Hooli AI" <No-Reply@hire.lever.co>\r\nTo: Jordan <jordan.example+jobs@gmail.com>\r\n'\
+          b'DKIM-Signature: v=1; a=rsa-sha256; d=hire.lever.co; s=k1;\r\n h=from:to:subject; bh=x; b=y\r\n\r\n'
+    import email
+    import email.policy
+    msg = email.message_from_bytes(raw, policy=email.policy.default)
+    assert inbox.sender(msg) == ("no-reply@hire.lever.co", "Hooli AI")
+    assert inbox.recipients(msg) == ["jordan.example+jobs@gmail.com"]
+    assert inbox.signatures(msg) == [("hire.lever.co", ["from", "to", "subject"])]
+    assert inbox.mailbox_key("jordan.example+jobs@gmail.com") == inbox.mailbox_key("JordanExample@googlemail.com")
+
+
+def test_someone_elses_signed_mail_sent_on_moves_nothing(db, monkeypatch):
+    replay = [{"uid": b"5", "id": "r1", "from": "Hooli AI <no-reply@hire.lever.co>", "date": NOW - timedelta(hours=1),
+               "auth": LEVER_AUTH, "address": "no-reply@hire.lever.co", "name": "Hooli AI", "signed": LEVER_SIGNED,
+               "to": ["someone.else@example.org"], "subject": "Your Hooli AI Application: Staff Platform Engineer"}]
+
+    class FakeBox:
+        conn = None
+        def __init__(self, creds): pass
+        def body(self, uid): return "For the Staff Platform Engineer (R1002) role, the position has been closed."
+        def close(self): pass
+    monkeypatch.setattr(inbox, "Box", FakeBox)
+    monkeypatch.setattr(inbox, "_search", lambda conn, days: [b"5"])
+    monkeypatch.setattr(inbox, "_headers", lambda conn, uids: replay)
+    monkeypatch.setattr(inbox, "credentials", lambda: ("me@example.com", "pw"))
+    monkeypatch.setattr(inbox, "_notify", lambda found: None)
+    assert inbox.check(days=2)["updates"] == []

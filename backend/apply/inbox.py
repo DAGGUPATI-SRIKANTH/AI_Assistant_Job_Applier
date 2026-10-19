@@ -113,20 +113,52 @@ def registrable(domain: str) -> str:
     return ".".join(parts[-2:])
 
 
-def sender_address(msg) -> str:
-    """The one mailbox a message is from, or "" when that is not plain: no From, several From lines,
-    several addresses, or a header the parser had to guess at (it flags those as defects)."""
+def sender(msg) -> tuple[str, str]:
+    """(address, name) of the one mailbox a message is from, read once by the strict parser -- or
+    ("", "") when that is not plain: no From, several From lines, several addresses, or a header
+    the parser had to guess at (it flags those as defects). The name the app matches on comes
+    from this same reading, never from a second parser that might read the header another way."""
     froms = msg.get_all("From") or []
     if len(froms) != 1:
-        return ""
+        return "", ""
     header = froms[0]
     try:
         addresses = list(getattr(header, "addresses", ()) or ())
     except Exception:
-        return ""
+        return "", ""
     if len(addresses) != 1 or getattr(header, "defects", None):
-        return ""
-    return (addresses[0].addr_spec or "").lower()
+        return "", ""
+    return (addresses[0].addr_spec or "").lower(), addresses[0].display_name or ""
+
+
+def recipients(msg) -> list[str]:
+    """Everyone a message was addressed to (To and Cc), as the strict parser reads them."""
+    out = []
+    for field in ("To", "Cc"):
+        for header in msg.get_all(field) or []:
+            try:
+                out += [(a.addr_spec or "").lower() for a in getattr(header, "addresses", ()) or ()]
+            except Exception:
+                continue
+    return out
+
+
+def signatures(msg) -> list[tuple[str, list[str]]]:
+    """Each DKIM signature's domain and the headers it covers."""
+    out = []
+    for sig in msg.get_all("DKIM-Signature") or []:
+        tags = dict(re.findall(r"(?:^|;)\s*([a-z]+)\s*=\s*([^;]*)", " ".join(str(sig).split()), re.I))
+        out.append((tags.get("d", "").strip().lower(),
+                    [h.strip().lower() for h in tags.get("h", "").split(":") if h.strip()]))
+    return out
+
+
+def mailbox_key(address: str) -> str:
+    """One address however it is written: Gmail ignores dots and "+anything" in the name."""
+    local, _, domain = (address or "").lower().partition("@")
+    if domain in ("gmail.com", "googlemail.com"):
+        local, domain = local.split("+")[0].replace(".", ""), "gmail.com"
+    return f"{local}@{domain}"
 
 
 def auth_results(header: str) -> tuple[str, list[tuple[str, str, dict]]]:
@@ -146,20 +178,28 @@ def auth_results(header: str) -> tuple[str, list[tuple[str, str, dict]]]:
     return authserv, out
 
 
-def verified(address: str, auth: str) -> str | None:
-    """The sender's domain (registrable) when Gmail's own check says the message came from it."""
+def verified(address: str, auth: str, signed: list[tuple[str, list[str]]] | None = None) -> str | None:
+    """The sender's domain (registrable) when Gmail's own DMARC check says the message came from it.
+
+    DMARC, not a DKIM signature alone: it is Gmail's judgement that the From domain itself sent
+    it. One DMARC result only -- two means one was written by someone else. And a message signed
+    by that domain can be sent on by whoever received it, so where the signature that passed does
+    not cover its To line, the To line proves nothing and the message is not taken."""
     org = registrable((address or "").rpartition("@")[2])
     authserv, results = auth_results(auth)
     if not org or authserv != GMAIL_AUTHSERV:
         return None
-    for method, result, props in results:
-        if result != "pass":
-            continue
-        if method == "dmarc" and registrable(props.get("header.from", "")) == org:
-            return org
-        if method == "dkim" and registrable((props.get("header.d") or props.get("header.i") or "").lstrip("@")) == org:
-            return org
-    return None
+    dmarc = [(result, props) for method, result, props in results if method == "dmarc"]
+    if len(dmarc) != 1 or dmarc[0][0] != "pass" or registrable(dmarc[0][1].get("header.from", "")) != org:
+        return None
+    if signed is not None:
+        aligned = [covers for domain, covers in signed if registrable(domain) == org]
+        passed = any(method == "dkim" and result == "pass"
+                     and registrable((props.get("header.d") or props.get("header.i") or "").lstrip("@")) == org
+                     for method, result, props in results)
+        if passed and not any("to" in covers for covers in aligned):
+            return None
+    return org
 
 
 def _own_domain(org: str, names) -> bool:
@@ -255,7 +295,7 @@ def targets() -> list[Target]:
 
 
 def match(sender: str, subject: str, body: str, among: list[Target], sent: datetime | None = None,
-          address: str | None = None) -> Target | None:
+          address: str | None = None, name: str | None = None) -> Target | None:
     """The application a message is about: its company named where an employer's mail names it.
 
     A message sent before the app had the job is about some other application at that company
@@ -263,8 +303,8 @@ def match(sender: str, subject: str, body: str, among: list[Target], sent: datet
     from datetime import timedelta
     if sent is not None:
         among = [t for t in among if t.since is None or sent >= t.since - timedelta(days=1)]
-    display, parsed = parseaddr(sender or "")
-    local, _, domain = (address if address is not None else parsed).lower().partition("@")
+    display, parsed = parseaddr(sender or "") if address is None else (name or "", address)
+    local, _, domain = parsed.lower().partition("@")
     org = registrable(domain)
     hiring = org in HIRING_DOMAINS
     head, subj, text = _norm(display), _norm(subject), _norm((body or "")[:6000])
@@ -300,13 +340,14 @@ def match(sender: str, subject: str, body: str, among: list[Target], sent: datet
     return best
 
 
-def lookup_job(sender: str, subject: str, body: str, address: str | None = None) -> Target | None:
+def lookup_job(sender: str, subject: str, body: str, address: str | None = None,
+               name: str | None = None) -> Target | None:
     """A job applied to outside the app, from the employer's receipt: the company named by the
     sender or the subject, and the job's title in the message. One clear answer, or None."""
     from data_engineering.db.models import Job
     from data_engineering.db.session import get_session
-    display, parsed = parseaddr(sender or "")
-    org = registrable((address if address is not None else parsed).rpartition("@")[2])
+    display, parsed = parseaddr(sender or "") if address is None else (name or "", address)
+    org = registrable(parsed.rpartition("@")[2])
     where = _norm(display) + _norm(subject)
     text = _norm(subject + " " + (body or "")[:8000])
     hits = []
@@ -363,15 +404,17 @@ def _headers(connection, uids: list[bytes]) -> list[dict]:
     for start in range(0, len(uids), 100):
         batch = b",".join(uids[start:start + 100]).decode()
         typ, data = connection.uid("FETCH", batch,
-                                   "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID AUTHENTICATION-RESULTS)])")
+                                   "(BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID "
+                                   "AUTHENTICATION-RESULTS DKIM-SIGNATURE)])")
         for part in data or []:
             if not isinstance(part, tuple):
                 continue
             uid = re.search(rb"UID (\d+)", part[0])
             msg = email.message_from_bytes(part[1], policy=email.policy.default)
             results = msg.get_all("Authentication-Results") or []
+            address, name = sender(msg)
             out.append({"uid": uid.group(1) if uid else None, "from": _text(msg["From"]),
-                        "address": sender_address(msg),
+                        "address": address, "name": name, "to": recipients(msg), "signed": signatures(msg),
                         "subject": _text(msg["Subject"]), "date": _when(msg["Date"]),
                         # Only the topmost: the one Gmail adds above everything the sender wrote.
                         "auth": str(results[0]) if results else "",
@@ -549,6 +592,16 @@ def _preview(target: Target, kind: str, message: dict) -> dict:
             "date": (message.get("date") or datetime.now(timezone.utc)).isoformat(), "seen": False}
 
 
+def _applicant_email() -> str:
+    """The address the applications were made with, from the profile, if it is not the mailbox's."""
+    try:
+        import yaml
+        profile = yaml.safe_load((PROJECT_ROOT / "backend" / "config" / "applicant.yaml").read_text()) or {}
+        return str((profile.get("personal") or {}).get("email") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
 def _check(days: int | None, say, dry_run: bool = False, again: bool = False) -> dict:
     creds = credentials()
     if creds is None:
@@ -560,6 +613,7 @@ def _check(days: int | None, say, dry_run: bool = False, again: bool = False) ->
         days = FIRST_DAYS if last is None else max(2, (datetime.now(timezone.utc) - last).days + 2)
     done: set[str] = set(st.get("done") or [])
     among = targets()
+    mine = {mailbox_key(a) for a in (creds[0], _applicant_email()) if a}
     found: list[dict] = []
     checked = matched = 0
     try:
@@ -574,20 +628,22 @@ def _check(days: int | None, say, dry_run: bool = False, again: bool = False) ->
             done.add(head["id"])
             if _NOISE.search(head["subject"]):
                 continue
-            address = head.get("address", "")
-            org = verified(address, head.get("auth", ""))
+            address, name = head.get("address", ""), head.get("name", "")
+            org = verified(address, head.get("auth", ""), head.get("signed") or [])
             if org is None:
                 continue                   # not provably from where it says: never moves an application
-            target = match(head["from"], head["subject"], "", among, head["date"], address=address)
+            if not any(mailbox_key(a) in mine for a in head.get("to") or []):
+                continue                   # someone else's mail, sent on: not news about your applications
+            target = match(head["from"], head["subject"], "", among, head["date"], address=address, name=name)
             body = ""
             if target is None:
                 # The company may be named only in the text (a hiring system's own sender name).
                 if org not in HIRING_DOMAINS:
                     continue
                 body = box.body(head["uid"])
-                target = match(head["from"], head["subject"], body, among, head["date"], address=address)
+                target = match(head["from"], head["subject"], body, among, head["date"], address=address, name=name)
                 if target is None and classify(head["subject"], body) == "confirmation":
-                    target = lookup_job(head["from"], head["subject"], body, address=address)
+                    target = lookup_job(head["from"], head["subject"], body, address=address, name=name)
                     if target is None:          # a receipt for a job not on the list: still worth seeing
                         found.append(_receipt(head))
                         continue

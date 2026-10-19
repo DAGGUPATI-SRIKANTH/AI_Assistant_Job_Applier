@@ -82,16 +82,25 @@ _TECH = re.compile(r"technical (interview|screen|round)|system design|coding int
 # -- who a message is from -------------------------------------------------------------------------
 #
 # Anyone can put "Acme" in a sender's name, and "x@acme.attacker.com" begins with "acme". So mail
-# moves an application only when Gmail found it really came from its domain (DKIM or DMARC passed,
-# in the Authentication-Results header it adds), and that domain is the employer's own or a hiring
-# system that sends employers' mail (whose messages name the employer in the sender or the text).
+# moves an application only when Gmail found it really came from its domain, and that domain is the
+# employer's own or a hiring system that sends employers' mail. "Found" is read from the one header
+# Gmail itself adds -- the topmost Authentication-Results, from mx.google.com -- never from one a
+# sender could have written into the message; and the sender is a single, well-formed address, the
+# same one Gmail checked ("no-reply@hire.lever.co <x@attacker.example>" is read differently by
+# different parsers, and is refused).
 HIRING_DOMAINS = frozenset({
     "greenhouse.io", "greenhouse-mail.io", "lever.co", "ashbyhq.com", "myworkday.com", "myworkdayjobs.com",
     "workday.com", "applytojob.com", "jazzhr.com", "icims.com", "smartrecruiters.com", "workablemail.com",
     "workable.com", "bamboohr.com", "breezy.hr", "recruitee.com", "jobvite.com", "taleo.net",
     "successfactors.com", "oraclecloud.com", "ultipro.com", "ukg.com", "paylocity.com", "rippling.com",
-    "gem.com", "dover.com", "teamtailor.com", "pinpointhq.com", "paycomonline.net", "adp.com",
-    "calendly.com", "goodtime.io", "linkedin.com", "indeed.com", "indeedemail.com"})
+    "teamtailor.com", "pinpointhq.com", "paycomonline.net", "adp.com"})
+# Not on that list on purpose: LinkedIn, Indeed, Calendly and the like carry anyone's messages under
+# any name; their mail counts only as part of an employer's own (a scheduling link in its email).
+# Nor can a mailbox anyone can open be an employer's "own domain".
+FREE_MAIL = frozenset({"gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com",
+                       "yahoo.com", "ymail.com", "icloud.com", "me.com", "aol.com", "proton.me",
+                       "protonmail.com", "gmx.com", "mail.com", "zoho.com", "yandex.com", "fastmail.com"})
+GMAIL_AUTHSERV = "mx.google.com"
 _SECOND_LEVEL = {"co", "com", "org", "net", "ac", "gov", "edu"}
 
 
@@ -104,24 +113,60 @@ def registrable(domain: str) -> str:
     return ".".join(parts[-2:])
 
 
-def verified(sender: str, auth: str) -> str | None:
-    """The sender's domain (registrable) when the message provably came from it, else None."""
-    _, address = parseaddr(sender or "")
-    org = registrable(address.rpartition("@")[2])
-    if not org:
+def sender_address(msg) -> str:
+    """The one mailbox a message is from, or "" when that is not plain: no From, several From lines,
+    several addresses, or a header the parser had to guess at (it flags those as defects)."""
+    froms = msg.get_all("From") or []
+    if len(froms) != 1:
+        return ""
+    header = froms[0]
+    try:
+        addresses = list(getattr(header, "addresses", ()) or ())
+    except Exception:
+        return ""
+    if len(addresses) != 1 or getattr(header, "defects", None):
+        return ""
+    return (addresses[0].addr_spec or "").lower()
+
+
+def auth_results(header: str) -> tuple[str, list[tuple[str, str, dict]]]:
+    """An Authentication-Results header read: (who wrote it, [(method, result, properties)]).
+    Quoted strings and comments are dropped first: the envelope sender Gmail quotes there is the
+    sender's to write, and a ";" in it must not start a result of its own."""
+    text = re.sub(r'"(?:[^"\\]|\\.)*"', '""', header or "")
+    text = re.sub(r"\([^()]*\)", " ", text)
+    parts = [part.strip() for part in text.split(";")]
+    authserv = parts[0].split()[0].lower() if parts and parts[0].split() else ""
+    out = []
+    for part in parts[1:]:
+        found = re.match(r"([a-z0-9-]+)\s*=\s*([a-z]+)\b(.*)$", part, re.I | re.S)
+        if found:
+            props = {k.lower(): v.lower() for k, v in re.findall(r"([a-z0-9.-]+)=(\S+)", found.group(3), re.I)}
+            out.append((found.group(1).lower(), found.group(2).lower(), props))
+    return authserv, out
+
+
+def verified(address: str, auth: str) -> str | None:
+    """The sender's domain (registrable) when Gmail's own check says the message came from it."""
+    org = registrable((address or "").rpartition("@")[2])
+    authserv, results = auth_results(auth)
+    if not org or authserv != GMAIL_AUTHSERV:
         return None
-    said = (auth or "").lower()
-    for result, domain in re.findall(r"\b(dmarc|dkim)=pass\b[^;]*?\b(?:header\.from|header\.d|header\.i)=@?([a-z0-9.-]+)",
-                                     said):
-        if registrable(domain) == org:
+    for method, result, props in results:
+        if result != "pass":
+            continue
+        if method == "dmarc" and registrable(props.get("header.from", "")) == org:
+            return org
+        if method == "dkim" and registrable((props.get("header.d") or props.get("header.i") or "").lstrip("@")) == org:
             return org
     return None
 
 
 def _own_domain(org: str, names) -> bool:
-    """Is this the employer's own domain: "acme.com" for Acme."""
+    """Is this the employer's own domain: "acme.com" for Acme (never a mailbox anyone can open)."""
     first = org.split(".")[0]
-    return bool(first) and any(n.replace(" ", "") == first for n in names)
+    return (org not in FREE_MAIL and len(first) >= 3
+            and any(n.replace(" ", "") == first for n in names))
 
 
 KIND_STAGE = {"rejection": "rejected", "closed": "closed", "offer": "offer", "assessment": "technical",
@@ -209,7 +254,8 @@ def targets() -> list[Target]:
     return out
 
 
-def match(sender: str, subject: str, body: str, among: list[Target], sent: datetime | None = None) -> Target | None:
+def match(sender: str, subject: str, body: str, among: list[Target], sent: datetime | None = None,
+          address: str | None = None) -> Target | None:
     """The application a message is about: its company named where an employer's mail names it.
 
     A message sent before the app had the job is about some other application at that company
@@ -217,8 +263,8 @@ def match(sender: str, subject: str, body: str, among: list[Target], sent: datet
     from datetime import timedelta
     if sent is not None:
         among = [t for t in among if t.since is None or sent >= t.since - timedelta(days=1)]
-    display, address = parseaddr(sender or "")
-    local, _, domain = address.lower().partition("@")
+    display, parsed = parseaddr(sender or "")
+    local, _, domain = (address if address is not None else parsed).lower().partition("@")
     org = registrable(domain)
     hiring = org in HIRING_DOMAINS
     head, subj, text = _norm(display), _norm(subject), _norm((body or "")[:6000])
@@ -254,13 +300,13 @@ def match(sender: str, subject: str, body: str, among: list[Target], sent: datet
     return best
 
 
-def lookup_job(sender: str, subject: str, body: str) -> Target | None:
+def lookup_job(sender: str, subject: str, body: str, address: str | None = None) -> Target | None:
     """A job applied to outside the app, from the employer's receipt: the company named by the
     sender or the subject, and the job's title in the message. One clear answer, or None."""
     from data_engineering.db.models import Job
     from data_engineering.db.session import get_session
-    display, address = parseaddr(sender or "")
-    org = registrable(address.rpartition("@")[2])
+    display, parsed = parseaddr(sender or "")
+    org = registrable((address if address is not None else parsed).rpartition("@")[2])
     where = _norm(display) + _norm(subject)
     text = _norm(subject + " " + (body or "")[:8000])
     hits = []
@@ -323,9 +369,12 @@ def _headers(connection, uids: list[bytes]) -> list[dict]:
                 continue
             uid = re.search(rb"UID (\d+)", part[0])
             msg = email.message_from_bytes(part[1], policy=email.policy.default)
+            results = msg.get_all("Authentication-Results") or []
             out.append({"uid": uid.group(1) if uid else None, "from": _text(msg["From"]),
+                        "address": sender_address(msg),
                         "subject": _text(msg["Subject"]), "date": _when(msg["Date"]),
-                        "auth": " ; ".join(str(a) for a in (msg.get_all("Authentication-Results") or [])),
+                        # Only the topmost: the one Gmail adds above everything the sender wrote.
+                        "auth": str(results[0]) if results else "",
                         "id": _text(msg["Message-ID"]) or f"uid:{uid.group(1).decode() if uid else ''}"})
     return out
 
@@ -525,19 +574,20 @@ def _check(days: int | None, say, dry_run: bool = False, again: bool = False) ->
             done.add(head["id"])
             if _NOISE.search(head["subject"]):
                 continue
-            org = verified(head["from"], head.get("auth", ""))
+            address = head.get("address", "")
+            org = verified(address, head.get("auth", ""))
             if org is None:
                 continue                   # not provably from where it says: never moves an application
-            target = match(head["from"], head["subject"], "", among, head["date"])
+            target = match(head["from"], head["subject"], "", among, head["date"], address=address)
             body = ""
             if target is None:
                 # The company may be named only in the text (a hiring system's own sender name).
                 if org not in HIRING_DOMAINS:
                     continue
                 body = box.body(head["uid"])
-                target = match(head["from"], head["subject"], body, among, head["date"])
+                target = match(head["from"], head["subject"], body, among, head["date"], address=address)
                 if target is None and classify(head["subject"], body) == "confirmation":
-                    target = lookup_job(head["from"], head["subject"], body)
+                    target = lookup_job(head["from"], head["subject"], body, address=address)
                     if target is None:          # a receipt for a job not on the list: still worth seeing
                         found.append(_receipt(head))
                         continue

@@ -122,9 +122,10 @@ def test_a_receipt_and_the_rejection_after_it_in_one_look(db, monkeypatch):
     sent = NOW - timedelta(days=4)
     mail = [
         {"uid": b"1", "id": "z1", "from": "Hooli AI <no-reply@hire.lever.co>", "date": sent, "auth": LEVER_AUTH,
-         "subject": "Thank you for your application to Hooli AI"},
+         "address": "no-reply@hire.lever.co", "subject": "Thank you for your application to Hooli AI"},
         {"uid": b"2", "id": "z2", "from": "Hooli AI <no-reply@hire.lever.co>", "date": sent + timedelta(days=3),
-         "auth": LEVER_AUTH, "subject": "Your Hooli AI Application: Staff Platform Engineer"},
+         "auth": LEVER_AUTH, "address": "no-reply@hire.lever.co",
+         "subject": "Your Hooli AI Application: Staff Platform Engineer"},
     ]
     texts = {b"1": "We received your application for Staff Platform Engineer (R1002), and we are delighted.",
              b"2": "For the Staff Platform Engineer (R1002) role, we have identified other candidates and will not "
@@ -184,20 +185,61 @@ def test_a_sender_name_or_a_look_alike_domain_moves_nothing(db):
 
 
 def test_only_authenticated_mail_counts():
-    assert inbox.verified("Hooli AI <no-reply@hire.lever.co>", LEVER_AUTH) == "lever.co"
-    assert inbox.verified("Talent <hr@globex.com>", "mx.google.com; dkim=pass header.d=globex.com; "
-                                                    "dmarc=pass header.from=globex.com") == "globex.com"
-    assert inbox.verified("Globex <hr@globex.com>", "mx.google.com; spf=softfail; dmarc=fail header.from=globex.com") is None
+    assert inbox.verified("no-reply@hire.lever.co", LEVER_AUTH) == "lever.co"
+    assert inbox.verified("hr@globex.com", "mx.google.com; dkim=pass header.d=globex.com; "
+                                           "dmarc=pass header.from=globex.com") == "globex.com"
+    assert inbox.verified("hr@globex.com", "mx.google.com; spf=softfail; dmarc=fail header.from=globex.com") is None
     # Signed, but by someone else's domain: not proof the mail is Globex's.
-    assert inbox.verified("Globex <hr@globex.com>", "mx.google.com; dkim=pass header.i=@sender.example") is None
-    assert inbox.verified("Globex <hr@globex.com>", "") is None
+    assert inbox.verified("hr@globex.com", "mx.google.com; dkim=pass header.i=@sender.example") is None
+    assert inbox.verified("hr@globex.com", "") is None
+
+
+def test_a_check_written_by_the_sender_proves_nothing():
+    # Not Gmail's own header; a pass tucked into a comment; and a ";" smuggled in the quoted envelope
+    # sender, which would otherwise read as a result of its own.
+    assert inbox.verified("hr@globex.com", "globex.com; dmarc=pass header.from=globex.com") is None
+    assert inbox.verified("hr@globex.com", "mx.google.com; dkim=neutral (dkim=pass header.d=globex.com) "
+                                           "header.d=sender.example") is None
+    assert inbox.verified("hr@globex.com", 'mx.google.com; spf=pass smtp.mailfrom="x;dkim=pass header.d=globex.com"'
+                                           '@sender.example; dmarc=fail header.from=globex.com') is None
+
+
+class FakeImap:
+    """A mailbox answering FETCH with these raw headers, as Gmail's IMAP does."""
+
+    def __init__(self, raw):
+        self.raw = raw
+
+    def uid(self, command, batch, what):
+        return "OK", [(b"1 (UID 7 BODY[HEADER.FIELDS (FROM)] {%d}" % len(self.raw), self.raw), b")"]
+
+
+def test_only_gmails_own_check_and_one_plain_sender_are_read():
+    gmail = b"Authentication-Results: mx.google.com; dmarc=fail header.from=hire.lever.co\r\n"
+    forged = b"Authentication-Results: mx.google.com; dkim=pass header.i=@hire.lever.co; dmarc=pass header.from=hire.lever.co\r\n"
+    head = inbox._headers(FakeImap(gmail + forged + b"From: Hooli AI <no-reply@hire.lever.co>\r\nSubject: Hi\r\n\r\n"),
+                          [b"7"])[0]
+    assert head["address"] == "no-reply@hire.lever.co" and inbox.verified(head["address"], head["auth"]) is None
+    for sender in (b"From: no-reply@hire.lever.co <x@sender.example>",          # parsers read it two ways
+                   b"From: no-reply@hire.lever.co, x@sender.example",          # two senders
+                   b"From: Hooli AI <no-reply@hire.lever.co>\r\nFrom: X <x@sender.example>"):   # two From lines
+        head = inbox._headers(FakeImap(forged + sender + b"\r\nSubject: Hi\r\n\r\n"), [b"7"])[0]
+        assert head["address"] == "", sender
+
+
+def test_platforms_anyone_can_send_through_and_free_mailboxes_speak_for_no_employer(db):
+    among = inbox.targets()
+    closed = ("Your application", "Unfortunately the Senior DevOps Engineer position has been closed.")
+    for sender in ("Globex <messages-noreply@linkedin.com>", "Globex Recruiting <notifications@calendly.com>",
+                   "Globex Careers <globex@gmail.com>"):
+        assert inbox.match(sender, *closed, among, NOW) is None, sender
     assert inbox.registrable("us.greenhouse-mail.io") == "greenhouse-mail.io"
     assert inbox.registrable("mail.globex.co.uk") == "globex.co.uk"
 
 
 def test_unauthenticated_mail_never_moves_an_application(db, monkeypatch):
     spoof = [{"uid": b"9", "id": "s1", "from": "Globex <no-reply@applytojob.com>", "date": NOW - timedelta(hours=2),
-              "auth": "mx.google.com; spf=fail; dmarc=fail header.from=applytojob.com",
+              "auth": "mx.google.com; spf=fail; dmarc=fail header.from=applytojob.com", "address": "no-reply@applytojob.com",
               "subject": "Your Application with Globex"}]
 
     class FakeBox:

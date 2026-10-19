@@ -80,7 +80,7 @@ They are not broken setup:
 | `test_tailoring_interrupted.py` (1) | Same process check, Unix-only |
 | `test_envfile.py`, `test_setup_page.py::test_saving_creates_an_owner_only_file` | Expect file mode `0600`; Windows reports `0666` (438) because it has no Unix permissions |
 | `test_setup_page.py` (2 others) | Provider readiness checks expect macOS tools and paths |
-| `test_plans.py::test_node_tools_are_found_from_a_background_service` | Splits `PATH` on `:` instead of `os.pathsep`, which breaks on `C:\...` (a real bug, worth fixing) |
+| `test_plans.py::test_node_tools_are_found_from_a_background_service` | The test splits `PATH` on `:` instead of `os.pathsep`, which breaks on `C:\...` (the app code is correct; fixed in a separate PR) |
 | `test_resume_templates.py` (1) | Expects a font that isn't installed, so it falls back to Helvetica |
 | `test_auto_apply.py`, `test_daily.py`, `test_letter_edit.py` (1 each) | Not yet investigated |
 

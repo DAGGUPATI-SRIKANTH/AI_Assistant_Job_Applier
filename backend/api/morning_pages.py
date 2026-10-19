@@ -157,15 +157,34 @@ def _alive(group: int) -> bool:
     return True
 
 
+def _end_tree(pid: int) -> None:
+    """Windows has no process groups: taskkill /T ends the process and every child it started."""
+    try:
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 @app.post("/run/morning/stop")
 def morning_stop():
     """End the morning run (and a fetch or re-score started from the page): the script and
     everything it started, which share its process group. What it fetched so far is kept --
     every board is saved as it is read."""
-    own = os.getpgid(0)
     morning = bool(pipeline_pids()) or LOCK.is_dir()
+    pids = pipeline_pids() + [p for p in (task_pid(t) for t in PAGE_TASKS) if p]
+    if os.name == "nt":
+        pids = [p for p in pids if p != os.getpid()]
+        if not pids and not LOCK.is_dir():
+            return jsonify(ok=True, stopped=False, note="Nothing was running.")
+        for pid in pids:
+            _end_tree(pid)
+        _clear_lock()
+        if morning:
+            _say("=== daily stopped from the Jobs page ===")
+        return jsonify(ok=True, stopped=True)
+    own = os.getpgid(0)
     groups: set[int] = set()
-    for pid in pipeline_pids() + [p for p in (task_pid(t) for t in PAGE_TASKS) if p]:
+    for pid in pids:
         try:
             group = os.getpgid(pid)
         except OSError:

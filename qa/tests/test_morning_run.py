@@ -3,6 +3,7 @@
 import os
 import signal
 import subprocess
+import sys
 from datetime import datetime, timedelta
 
 import pytest
@@ -119,6 +120,7 @@ def test_start_waits_for_a_fetch_started_from_the_page(controls, monkeypatch):
     assert reply.status_code == 409 and "fetch you started" in reply.get_json()["error"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="process groups are Unix-only")
 def test_stop_ends_the_run_and_all_it_started_and_clears_its_lock(controls, monkeypatch):
     data, client = controls
     # A stand-in for the script and its children: a process group of its own.
@@ -138,6 +140,27 @@ def test_stop_ends_the_run_and_all_it_started_and_clears_its_lock(controls, monk
             os.killpg(run.pid, signal.SIGKILL)
         except OSError:
             pass
+
+
+@pytest.mark.skipif(os.name != "nt", reason="taskkill is Windows-only")
+def test_stop_on_windows_ends_the_run_and_its_children_and_clears_its_lock(controls, monkeypatch):
+    data, client = controls
+    # A stand-in for the script: a process that starts a child and prints the child's pid.
+    child = "import subprocess, sys, time; c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); print(c.pid, flush=True); time.sleep(30)"
+    run = subprocess.Popen([sys.executable, "-c", child], stdout=subprocess.PIPE, text=True)
+    child_pid = int(run.stdout.readline())
+    try:
+        monkeypatch.setattr(morning_pages, "pipeline_pids", lambda: [run.pid])
+        (data / "daily.lock").mkdir()
+        assert client.post("/run/morning/stop").get_json() == {"ok": True, "stopped": True}
+        run.wait(timeout=5)
+        listed = subprocess.run(["tasklist", "/FI", f"PID eq {child_pid}", "/NH"],
+                                capture_output=True, text=True).stdout
+        assert str(child_pid) not in listed                 # the child is gone too
+        assert not (data / "daily.lock").exists()
+        assert "=== daily stopped from the Jobs page ===" in (data / "daily_run.log").read_text()
+    finally:
+        subprocess.run(["taskkill", "/PID", str(run.pid), "/T", "/F"], capture_output=True)
 
 
 def test_stop_with_nothing_running_says_so(controls):

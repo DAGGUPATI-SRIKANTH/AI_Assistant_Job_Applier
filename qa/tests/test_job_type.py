@@ -122,3 +122,26 @@ def test_the_job_page_shows_it_and_takes_a_correction(db, monkeypatch):
     r = c.post("/job/7/job-type", json={"reset": True}).get_json()
     assert (r["type"], r["manual"]) == ("contract", False)                # back to the posting's reading
     assert c.post("/job/7/job-type", json={"type": ""}).get_json()["label"] == ""    # "not stated"
+
+
+# A posting with a long run of blanks once took minutes to read: patterns that let blanks in at more
+# than one place tried every way of sharing the run out. Reading stays quick on such text now.
+SLOW_ONCE = {
+    "a number, then blanks": "1" + " " * 30000 + "x",
+    "full-time, then blanks": "full-time" + " " * 30000 + "x",
+    "blanks either side of a number": "duration:" + " " * 15000 + "5" + " " * 15000 + "x",
+    "one very long word": "this is a " + "a" * 100000,
+    "blank lines": "6" + " \n" * 15000 + "months contract",
+    "numbers and blanks": "1 " * 20000,
+}
+
+
+@pytest.mark.parametrize("name", SLOW_ONCE)
+def test_a_posting_full_of_blanks_is_read_quickly(name):
+    import time
+
+    from backend.core.jobfields import derive
+    text = SLOW_ONCE[name]
+    started = time.perf_counter()
+    derive("Engineer " + " " * 3000 + "W2", "Remote " + " " * 3000, text, text)
+    assert time.perf_counter() - started < 2.0, name

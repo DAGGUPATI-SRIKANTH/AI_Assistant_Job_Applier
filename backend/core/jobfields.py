@@ -20,9 +20,18 @@ from dataclasses import dataclass
 _UNICODE_SPACE = re.compile(r"[\u00a0\u2007\u202f\u2009\u200a\u2002-\u2006]")
 
 
+_BLANKS = re.compile(r"[^\S\n]+")         # spaces and tabs, not line breaks
+_LINES = re.compile(r"\s*\n\s*")
+
+
 def _normalise(text: str | None) -> str:
-    """Ordinary spaces, so a pattern written with one keeps working."""
-    return _UNICODE_SPACE.sub(" ", text) if text else ""
+    """Ordinary spaces, so a pattern written with one keeps working -- and a run of blanks as one
+    space, a run of blank lines as one line break. With long runs left in, patterns that allow
+    blanks in more than one place (between a number, a dash and another number) tried every way of
+    sharing them out: a posting with 20,000 blanks after a number took 16 seconds, longer runs minutes."""
+    if not text:
+        return ""
+    return _LINES.sub("\n", _BLANKS.sub(" ", _UNICODE_SPACE.sub(" ", text)))
 
 
 REMOTE = "remote"
@@ -282,58 +291,61 @@ JOB_TYPE_SHORT = {"full-time": "Full-time", "contract": "Contract", "contract-to
 # A contract of any kind outranks full-time: "a full-time contract" is a contract.
 _TYPE_ORDER = ("contract-to-hire", "contract", "temporary", "internship", "part-time", "full-time")
 
-_C2H = r"\bcontract[\s-]+to[\s-]+(?:hire|perm(?:anent)?)\b|\b(?:c2h|cth)\b|\btemp(?:orary)?[\s-]+to[\s-]+(?:hire|perm(?:anent)?)\b"
+# The patterns below read text whose blanks are already one space or one line break (_normalise),
+# and every gap in them is one whitespace character or a short, bounded class -- never two
+# open-ended runs side by side. With those ("\d\s*\+?\s*-?\s*months"), a posting carrying a long run
+# of blanks took minutes to read: the matcher tried every way of sharing the run between them.
+_C2H = (r"\bcontract[\s-]{1,3}to[\s-]{1,3}(?:hire|perm(?:anent)?)\b|\b(?:c2h|cth)\b"
+        r"|\btemp(?:orary)?[\s-]{1,3}to[\s-]{1,3}(?:hire|perm(?:anent)?)\b")
 # "Contract Manager", "Contract Specialist": a job about contracts, not a contract job.
 _CONTRACT_WORK = (r"(?:manager|management|specialist|administrator|admin|analyst|negotiator|officer|coordinator|"
                   r"compliance|attorney|lawyer|counsel|paralegal|reviewer|review|pricing|lead|associate|director|"
                   r"closeout|accountant|operations|support|assistant|clerk)")
 # "(no C2C, no 1099, no third-party)", "not a contract role": what a posting says it is not.
-_NEGATED = re.compile(r"\b(?:no|not|non|without|excluding)[\s-]+(?:an?\s+|any\s+)?(?:c2c|corp[\s-]+to[\s-]+corp|1099|"
-                      r"contract(?:ors?|s)?|third[\s-]+part(?:y|ies)|w-?2)\b", re.I)
+_NEGATED = re.compile(r"\b(?:no|not|non|without|excluding)[\s-]{1,3}(?:an?\s|any\s)?(?:c2c|corp[\s-]to[\s-]corp|1099|"
+                      r"contract(?:ors?|s)?|third[\s-]part(?:y|ies)|w-?2)\b", re.I)
 _TITLE_RULES = (
     ("contract-to-hire", re.compile(_C2H, re.I)),
-    ("contract", re.compile(r"\b(?:c2c|corp[\s-]+to[\s-]+corp|1099)\b", re.I)),
+    ("contract", re.compile(r"\b(?:c2c|corp[\s-]to[\s-]corp|1099)\b", re.I)),
     # Staffing firms' "W2 Role - Data Engineer" is a contract; "Engineer (Full-time W2)" is not.
     ("contract", re.compile(r"^(?!.*\b(?:full[\s-]?time|permanent|fte)\b).*\bw-?2\b", re.I)),
-    ("contract", re.compile(rf"\bcontract(?:or)?\b(?!\s+{_CONTRACT_WORK}\b)", re.I)),
+    ("contract", re.compile(rf"\bcontract(?:or)?\b(?!\s{_CONTRACT_WORK}\b)", re.I)),
     ("temporary", re.compile(r"\b(?:temp|temporary|seasonal)\b", re.I)),
     ("internship", re.compile(r"\bintern(?:ship)?s?\b", re.I)),
     ("part-time", re.compile(r"\bpart[\s-]?time\b", re.I)),
     ("full-time", re.compile(r"\bfull[\s-]?time\b|\bpermanent\b", re.I)),
 )
 # "Employment type: Contract", "Job type: Full-time" (job alerts), "Position type: Contract to hire".
-_LABELLED = re.compile(r"\b(?:employment|job|position|work|worker|contract|role|engagement)[\s-]*"
-                       r"(?:type|status|category)\s*[:\-–]\s*([^\n|;•]{2,40})", re.I)
+_LABELLED = re.compile(r"\b(?:employment|job|position|work|worker|contract|role|engagement)[\s-]?"
+                       r"(?:type|status|category)\s?[:\-–]\s?([^\n|;•]{2,40})", re.I)
 _TEXT_RULES = (
-    ("contract-to-hire", re.compile(_C2H + r"|\bright[\s-]+to[\s-]+hire\b", re.I)),
+    ("contract-to-hire", re.compile(_C2H + r"|\bright[\s-]{1,3}to[\s-]{1,3}hire\b", re.I)),
     ("contract", re.compile(
-        r"\b\d{1,2}\s*\+?\s*-?\s*(?:months?|mos?|weeks?)\b[^.\n]{0,25}?\bcontract\b"     # "6-month contract"
+        r"\b\d{1,2}[\s+-]{0,4}(?:months?|mos?|weeks?)\b[^.\n]{0,25}?\bcontract\b"        # "6-month contract"
         # Not "contract period" or "contract term", nor "work on a contract": in a defense posting those
         # are the employer's government contract ("the contract period of performance").
-        r"|\bcontract\s+(?:role|position|assignment|engagement|opportunity|basis|job|duration|length)\b"
-        r"|\bthis\s+is\s+an?\s+(?:[\w-]+\s+){0,3}contract(?:\s+(?:role|position|job|assignment|opportunity|"
-        r"engagement|gig)\b|\s*[.,;!)]|\s+with\b)"
-        r"|\b(?:c2c|corp[\s-]+to[\s-]+corp)\b|\b1099\s+(?:contract|role|position|basis)\b"
-        r"|(?<!direct\s)\bw-?2\s+(?:contract|role)\b"          # not "a full-time, direct W2 position"
-        r"|\bduration\s*[:\-–]\s*\d+\s*\+?\s*(?:months?|weeks?|years?)\b", re.I)),
-    ("temporary", re.compile(r"\btemporary\s+(?:role|position|assignment|job|opportunity|basis)\b"
-                             r"|\bthis\s+is\s+a\s+temporary\b", re.I)),
-    ("internship", re.compile(r"\bthis\s+is\s+an?\s+(?:[\w-]+\s+){0,2}internship\b"
-                              r"|\b(?:summer|fall|spring|winter|paid)\s+internship\b", re.I)),
-    ("part-time", re.compile(r"\bthis\s+is\s+a\s+part[\s-]?time\b"
-                             r"|\bpart[\s-]?time\s+(?:role|position|job|opportunity|basis|schedule)\b", re.I)),
-    ("full-time", re.compile(r"\bthis\s+(?:is|will\s+be)\s+an?\s+(?:[\w-]+\s+){0,2}full[\s-]?time\b"
-                             r"|\bfull[\s-]?time\s+(?:role|position|job|opportunity|employment|employee|permanent|"
-                             r"salaried|exempt|w-?2|offers?)\b|\bpermanent\s+(?:role|position|job|full[\s-]?time)\b"
+        r"|\bcontract\s(?:role|position|assignment|engagement|opportunity|basis|job|duration|length)\b"
+        r"|\bthis\sis\san?\s(?:[\w-]{1,40}\s){0,3}contract(?:\s(?:role|position|job|assignment|opportunity|"
+        r"engagement|gig)\b|\s?[.,;!)]|\swith\b)"
+        r"|\b(?:c2c|corp[\s-]to[\s-]corp)\b|\b1099\s(?:contract|role|position|basis)\b"
+        r"|(?<!direct\s)\bw-?2\s(?:contract|role)\b"          # not "a full-time, direct W2 position"
+        r"|\bduration\s?[:\-–]\s?\d{1,3}[\s+]{0,3}(?:months?|weeks?|years?)\b", re.I)),
+    ("temporary", re.compile(r"\btemporary\s(?:role|position|assignment|job|opportunity|basis)\b"
+                             r"|\bthis\sis\sa\stemporary\b", re.I)),
+    ("internship", re.compile(r"\bthis\sis\san?\s(?:[\w-]{1,40}\s){0,2}internship\b"
+                              r"|\b(?:summer|fall|spring|winter|paid)\sinternship\b", re.I)),
+    ("part-time", re.compile(r"\bthis\sis\sa\spart[\s-]?time\b"
+                             r"|\bpart[\s-]?time\s(?:role|position|job|opportunity|basis|schedule)\b", re.I)),
+    ("full-time", re.compile(r"\bthis\s(?:is|will\sbe)\san?\s(?:[\w-]{1,40}\s){0,2}full[\s-]?time\b"
+                             r"|\bfull[\s-]?time\s(?:role|position|job|opportunity|employment|employee|permanent|"
+                             r"salaried|exempt|w-?2|offers?)\b|\bpermanent\s(?:role|position|job|full[\s-]?time)\b"
                              # "the salary range for full-time employees for this position", "benefits for
                              # full-time employees", "full-time employees are eligible / also receive"
-                             r"|\b(?:salary|pay|compensation|wage)\b[^.\n]{0,40}\bfor\s+full[\s-]?time\b"
-                             r"|\bbenefits?\b[^.\n]{0,60}\bfull[\s-]?time\s+employees\b"
-                             r"|\bfull[\s-]?time\s+employees\s+(?:are|also|have|receive|get|enjoy|can|may)\b"
-                             r"|\bfull[\s-]?time\s*,?\s*(?:direct\s+)?w-?2\b", re.I)),     # "full-time, direct W2"
+                             r"|\b(?:salary|pay|compensation|wage)\b[^.\n]{0,40}\bfor\sfull[\s-]?time\b"
+                             r"|\bbenefits?\b[^.\n]{0,60}\bfull[\s-]?time\semployees\b"
+                             r"|\bfull[\s-]?time\semployees\s(?:are|also|have|receive|get|enjoy|can|may)\b"
+                             r"|\bfull[\s-]?time[\s,]{1,3}(?:direct\s)?w-?2\b", re.I)),     # "full-time, direct W2"
 )
-
-
 def type_of(label: str | None) -> str | None:
     """A kind of job from a board's own field or a labelled line: "Full-time", "FullTime",
     "Contract to hire", "Contractor", "Temp", "Intern", "Permanent", "Contingent Worker"."""
@@ -361,7 +373,7 @@ def job_type(title: str | None, description: str | None, requirements: str | Non
     """What kind of job a posting is, from what it states: its title, its board's own field,
     a labelled line ("Employment type: Contract") and its wording ("a 6-month contract"). A
     contract of any kind outranks full-time. Nothing stated is None -- never a guess."""
-    heading = _NEGATED.sub(" ", _normalise(title))
+    heading = _NEGATED.sub(" ", _normalise(title)[:300])
     found: set[str | None] = {kind for kind, rule in _TITLE_RULES if rule.search(heading)}
     found.add(type_of(stated))
     text = _NEGATED.sub(" ", _normalise("\n".join(part for part in (description, requirements) if part)[:30000]))

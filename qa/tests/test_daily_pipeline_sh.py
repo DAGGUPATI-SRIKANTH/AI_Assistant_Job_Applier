@@ -8,6 +8,13 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[2] / "devops" / "daily_pipeline.sh"
+# On Windows the app runs the script with Git Bash (backend/api/morning_pages.py), and so do these.
+if os.name == "nt":
+    from backend.api.morning_pages import BASH
+    PATH_TAIL = [str(Path(BASH).parents[1] / "usr" / "bin")] if BASH else []
+else:
+    BASH, PATH_TAIL = "/bin/bash", ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+pytestmark = pytest.mark.skipif(not BASH, reason="no Git for Windows bash")
 
 
 @pytest.fixture
@@ -32,9 +39,9 @@ def project(tmp_path):
         path.chmod(0o755)
 
     def run(**env):
-        full = {"PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin", "PIPELINE_PROJECT": str(root),
+        full = {"PATH": os.pathsep.join([str(bin_dir), *PATH_TAIL]), "PIPELINE_PROJECT": str(root),
                 "NOTIFY": "0", "WAKE_POLL": "0.05", "HOME": os.environ.get("HOME", "/tmp"), **env}
-        done = subprocess.run(["/bin/bash", str(SCRIPT), "daily"], env=full, capture_output=True,
+        done = subprocess.run([BASH, str(SCRIPT), "daily"], env=full, capture_output=True,
                               text=True, timeout=30)
         log = (root / "data" / "daily_run.log")
         return done, log.read_text() if log.exists() else "", calls.read_text() if calls.exists() else ""
@@ -90,6 +97,9 @@ def test_a_mac_that_was_off_says_so_and_runs_as_the_schedule_would(project):
     assert "main.py daily --cloud" in calls
 
 
+# Git Bash's ps has no -o, so owner_alive cannot see the run on Windows; there the app checks
+# for a live run itself before starting one (morning_pages.pipeline_pids).
+@pytest.mark.skipif(os.name == "nt", reason="the script's owner check uses ps -o")
 def test_a_live_run_keeps_its_lock_and_a_dead_ones_lock_is_cleared(project):
     root, run = project
     lock, pidfile = root / "data" / "daily.lock", root / "data" / "daily.pid"

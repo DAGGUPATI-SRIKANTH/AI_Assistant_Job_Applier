@@ -18,6 +18,10 @@ set -uo pipefail
 # tests (qa/tests/test_daily_pipeline_sh.py); launchd never sets it.
 PROJECT="${PIPELINE_PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 PY="$PROJECT/.venv/bin/python"
+# Windows, under Git Bash (backend/api/morning_pages.py): the venv keeps it in Scripts\.
+if [ ! -x "$PY" ] && [ -x "$PROJECT/.venv/Scripts/python.exe" ]; then
+  PY="$PROJECT/.venv/Scripts/python.exe"
+fi
 
 # Hold the Mac awake for the length of the run.
 #

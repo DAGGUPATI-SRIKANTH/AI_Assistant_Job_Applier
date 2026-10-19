@@ -11,6 +11,7 @@ the macOS launchd job writes (devops/launchd/com.AI_Assistant_Job_Applier.webapp
 """
 
 import ctypes
+import os
 import subprocess
 import sys
 import time
@@ -20,6 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x800      # a long fetch may leave, to outlive an app restart
 JobObjectExtendedLimitInformation = 9
 
 
@@ -39,7 +41,7 @@ def _job() -> int:
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateJobObjectW.restype = wintypes.HANDLE
     job = kernel32.CreateJobObjectW(None, None)
-    limits = _Limits(LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+    limits = _Limits(LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK)
     kernel32.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
     kernel32.SetInformationJobObject(job, JobObjectExtendedLimitInformation,
                                      ctypes.byref(limits), ctypes.sizeof(limits))
@@ -57,8 +59,10 @@ def main() -> None:
     kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
     kernel32.AssignProcessToJobObject(_job(), kernel32.GetCurrentProcess())
     while True:
-        code = subprocess.call([sys.executable, "-X", "utf8", "-m", "backend.api"], cwd=ROOT,
-                               stdout=log, stderr=log, stdin=subprocess.DEVNULL)
+        # PYTHONUTF8, not -X utf8: the app runs main.py as a child and reads its output as UTF-8,
+        # so the child must write UTF-8 too, and a flag is not inherited (docs/WINDOWS_SETUP.md, step 3).
+        code = subprocess.call([sys.executable, "-m", "backend.api"], cwd=ROOT, stdout=log, stderr=log,
+                               stdin=subprocess.DEVNULL, env={**os.environ, "PYTHONUTF8": "1"})
         log.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  web app stopped (exit {code}); "
                   "starting it again in 10 s\n")
         time.sleep(10)

@@ -205,17 +205,56 @@ def dkim_signers(raw: bytes, dnsfunc=None, at: float | None = None) -> list[tupl
     return out
 
 
-def verified(address: str, raw: bytes, dnsfunc=None, at: float | None = None) -> str | None:
+def verified(address: str, raw: bytes, dnsfunc=None, at: float | None = None,
+             need=("from", "to")) -> str | None:
     """The sender's domain (registrable) when the message proves it sent it: a DKIM signature by
-    that same domain, verified here, covering the From line and the To line (signed for whom it
-    says, so someone else's mail sent on cannot pass as yours)."""
+    that same domain, verified here, covering every field in `need` -- the From line, the line
+    that says it was for you, and whatever else is read from the message."""
     org = registrable((address or "").rpartition("@")[2])
     if not org or not raw:
         return None
     for domain, covers in dkim_signers(raw, dnsfunc, at):
-        if registrable(domain) == org and {"from", "to"} <= covers:
+        if registrable(domain) == org and set(need) <= covers:
             return org
     return None
+
+
+# Fields a message may carry once (RFC 5322). A signature covers the lowest copy of each field it
+# names; a second copy added above it is unsigned, yet a reader would read it -- a "To:" with your
+# address over the signed one, a "Subject:" over the real subject. So a second copy refuses the
+# message, and the fields are read from the same split of the header that the signature check uses.
+SINGLE_FIELDS = ("from", "sender", "reply-to", "to", "cc", "subject", "date", "message-id")
+
+
+def read(raw: bytes) -> dict | None:
+    """The message as signed: sender, name, To and Cc, subject -- or None when it is not plain."""
+    import dkim
+    try:
+        lines = dkim.DKIM(raw).headers
+    except Exception:
+        return None
+    fields: dict[str, list[str]] = {}
+    for name, value in lines:
+        fields.setdefault(name.decode("latin-1").strip().lower(), []).append(
+            " ".join(value.decode("utf-8", "replace").split()))
+    if any(len(fields.get(field) or []) > 1 for field in SINGLE_FIELDS):
+        return None
+    factory = email.policy.default.header_factory
+    parsed = {}
+    for field in ("from", "to", "cc"):
+        if field in fields:
+            header = factory(field, fields[field][0])
+            if header.defects:
+                return None
+            parsed[field] = list(header.addresses)
+    froms = parsed.get("from") or []
+    if len(froms) != 1:
+        return None
+    subject = str(factory("subject", fields["subject"][0])) if "subject" in fields else ""
+    return {"address": (froms[0].addr_spec or "").lower(), "name": froms[0].display_name or "",
+            "from": fields["from"][0], "subject": " ".join(subject.split()),
+            "to": [(a.addr_spec or "").lower() for a in parsed.get("to") or []],
+            "cc": [(a.addr_spec or "").lower() for a in parsed.get("cc") or []]}
 
 
 def _own_domain(org: str, names) -> bool:
@@ -658,18 +697,34 @@ def _check(days: int | None, say, dry_run: bool = False, again: bool = False) ->
             org = registrable(address.rpartition("@")[2])
             if org in FREE_MAIL:
                 continue
-            target = match(head["from"], head["subject"], "", among, head["date"], address=address, name=name)
-            if target is None and org not in HIRING_DOMAINS:
+            # The listing's header only decides whether to fetch the message: nothing is acted on
+            # from it. What follows reads the message itself, as its signature covers it.
+            if match(head["from"], head["subject"], "", among, head["date"], address=address,
+                     name=name) is None and org not in HIRING_DOMAINS:
                 continue                   # names nothing of yours: not worth fetching
             raw = box.raw(head["uid"])
-            if verified(address, raw, at=head.get("arrived")) is None:
-                continue                   # not provably from where it says: never moves an application
+            signed = read(raw)
+            if signed is None or signed["address"] != address:
+                continue                   # a field twice, or not the sender the listing showed
+            for_you = next((field for field in ("to", "cc")
+                            if any(mailbox_key(a) in mine for a in signed[field])), None)
+            if for_you is None or verified(address, raw, at=head.get("arrived"),
+                                           need=("from", "subject", for_you)) is None:
+                continue                   # not provably from where it says, to you: never acted on
+            when = (datetime.fromtimestamp(head["arrived"], tz=timezone.utc) if head.get("arrived")
+                    else head["date"])     # when Gmail took it in, not a date the sender wrote
+            head = {**head, "from": signed["from"], "name": signed["name"], "subject": signed["subject"],
+                    "date": when}
+            if _NOISE.search(head["subject"]):
+                continue
             body = text_of(raw)
+            target = match(head["from"], head["subject"], "", among, when, address=address, name=signed["name"])
             if target is None:
                 # The company may be named only in the text (a hiring system's own sender name).
-                target = match(head["from"], head["subject"], body, among, head["date"], address=address, name=name)
+                target = match(head["from"], head["subject"], body, among, when, address=address,
+                               name=signed["name"])
                 if target is None and classify(head["subject"], body) == "confirmation":
-                    target = lookup_job(head["from"], head["subject"], body, address=address, name=name)
+                    target = lookup_job(head["from"], head["subject"], body, address=address, name=signed["name"])
                     if target is None:          # a receipt for a job not on the list: still worth seeing
                         found.append(_receipt(head))
                         continue

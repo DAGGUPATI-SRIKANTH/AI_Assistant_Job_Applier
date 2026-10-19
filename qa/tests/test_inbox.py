@@ -40,13 +40,22 @@ def dns(keys, monkeypatch):
     return keys
 
 
-def signed(keys, sender, to, subject, body, by=None, cover=(b"from", b"to", b"subject"), length=False) -> bytes:
-    """A message as it would arrive, DKIM-signed by `by` (the sender's own domain unless said)."""
+def signed(keys, sender, to, subject, body, by=None, cover=(b"from", b"to", b"subject"), length=False,
+           at: datetime | None = None) -> bytes:
+    """A message as it would arrive, DKIM-signed by `by` (the sender's own domain unless said),
+    signed at `at` (now unless said: a message from four days ago was signed four days ago)."""
     import dkim
     domain = by or sender.rpartition("@")[2].rstrip(">")
     msg = (f"From: {sender}\r\nTo: {to}\r\nSubject: {subject}\r\n"
            f"Date: Mon, 19 Oct 2026 09:00:00 +0000\r\n\r\n{body}\r\n").encode()
-    return dkim.sign(msg, b"sel", domain.encode(), keys[domain][0], include_headers=list(cover), length=length) + msg
+    real = dkim.time
+    if at is not None:
+        dkim.time = inbox._At(at.timestamp())
+    try:
+        return dkim.sign(msg, b"sel", domain.encode(), keys[domain][0], include_headers=list(cover),
+                         length=length) + msg
+    finally:
+        dkim.time = real
 
 
 @pytest.fixture
@@ -167,10 +176,9 @@ def fake_mailbox(monkeypatch, mail, raws):
 
 
 def head(uid, sender, name, subject, sent, to="me@example.com"):
-    """A message's header as the mailbox lists it. It arrived now: the test signs it now."""
-    import time
+    """A message's header as the mailbox lists it: it arrived when it was sent."""
     return {"uid": uid, "id": uid.decode(), "from": f"{name} <{sender}>", "address": sender, "name": name,
-            "to": [to], "subject": subject, "date": sent, "arrived": time.time()}
+            "to": [to], "subject": subject, "date": sent, "arrived": sent.timestamp()}
 
 
 def test_a_receipt_and_the_rejection_after_it_in_one_look(db, dns, monkeypatch):
@@ -180,10 +188,11 @@ def test_a_receipt_and_the_rejection_after_it_in_one_look(db, dns, monkeypatch):
     mail = [head(b"1", lever, "Hooli AI", "Thank you for your application to Hooli AI", sent),
             head(b"2", lever, "Hooli AI", "Your Hooli AI Application: Staff Platform Engineer", sent + timedelta(days=3))]
     raws = {b"1": signed(dns, f"Hooli AI <{lever}>", "me@example.com", mail[0]["subject"],
-                         "We received your application for Staff Platform Engineer (R1002), and we are delighted."),
+                         "We received your application for Staff Platform Engineer (R1002), and we are delighted.",
+                         at=sent),
             b"2": signed(dns, f"Hooli AI <{lever}>", "me@example.com", mail[1]["subject"],
                          "For the Staff Platform Engineer (R1002) role, we have identified other candidates and "
-                         "will not be moving forward with your candidacy at this time.")}
+                         "will not be moving forward with your candidacy at this time.", at=sent + timedelta(days=3))}
     fake_mailbox(monkeypatch, mail, raws)
     result = inbox.check(days=10)
     assert [u["change"] for u in result["updates"]] == ["Marked Applied", "Rejected"]
@@ -306,7 +315,7 @@ def test_someone_elses_signed_mail_sent_on_moves_nothing(db, dns, monkeypatch):
     mail = [head(b"5", lever, "Hooli AI", "Your Hooli AI Application: Staff Platform Engineer", sent,
                  to="someone.else@example.org")]
     raw = signed(dns, f"Hooli AI <{lever}>", "someone.else@example.org", mail[0]["subject"],
-                 "For the Staff Platform Engineer (R1002) role, the position has been closed.")
+                 "For the Staff Platform Engineer (R1002) role, the position has been closed.", at=sent)
     fake_mailbox(monkeypatch, mail, {b"5": raw})
     assert inbox.check(days=2)["updates"] == []
 
@@ -314,3 +323,45 @@ def test_someone_elses_signed_mail_sent_on_moves_nothing(db, dns, monkeypatch):
 def test_one_mailbox_however_written():
     assert inbox.mailbox_key("jordan.example+jobs@gmail.com") == inbox.mailbox_key("JordanExample@googlemail.com")
     assert inbox.mailbox_key("jordan.example@globex.com") != inbox.mailbox_key("jordanexample@globex.com")
+
+
+# -- a signed message with a line added above a signed one: the signature still checks, a reader
+#    would read the added line ---------------------------------------------------------------------
+
+def test_a_second_copy_of_a_field_added_above_the_signed_one_refuses_the_message(dns):
+    sent_on = signed(dns, "Hooli AI <no-reply@hire.lever.co>", "someone.else@example.org", "Your application",
+                     "For the Staff Platform Engineer role, the position has been closed.")
+    assert inbox.verified("no-reply@hire.lever.co", sent_on) == "lever.co"          # the signature itself holds
+    for added in (b"To: me@example.com\r\n", b"Subject: Your application: position closed\r\n",
+                  b"From: Hooli AI <no-reply@hire.lever.co>\r\n"):
+        assert inbox.read(added + sent_on) is None, added
+
+
+def test_the_line_naming_you_and_the_subject_must_be_signed(dns):
+    # Signed for someone else, with you only on a Cc line the signature does not cover.
+    raw = signed(dns, "Hooli AI <no-reply@hire.lever.co>", "someone.else@example.org", "Your application",
+                 "The position has been closed.")
+    with_cc = raw.replace(b"To: someone.else@example.org\r\n", b"To: someone.else@example.org\r\nCc: me@example.com\r\n")
+    facts = inbox.read(with_cc)
+    assert facts["cc"] == ["me@example.com"]
+    assert inbox.verified("no-reply@hire.lever.co", with_cc, need=("from", "subject", "cc")) is None
+    unsigned_subject = signed(dns, "Hooli AI <no-reply@hire.lever.co>", "me@example.com", "Hi", "Hello.",
+                              cover=(b"from", b"to"))
+    assert inbox.verified("no-reply@hire.lever.co", unsigned_subject, need=("from", "subject", "to")) is None
+
+
+def test_the_message_is_read_as_signed(dns):
+    raw = signed(dns, '"Hooli AI" <No-Reply@hire.lever.co>', "Jordan <me@example.com>",
+                 "=?utf-8?q?Your_application_to_Hooli_AI?=", "Thanks.")
+    facts = inbox.read(raw)
+    assert (facts["address"], facts["name"], facts["to"]) == ("no-reply@hire.lever.co", "Hooli AI", ["me@example.com"])
+    assert facts["subject"] == "Your application to Hooli AI"
+
+
+def test_a_message_with_an_added_to_line_moves_nothing(db, dns, monkeypatch):
+    lever = "no-reply@hire.lever.co"
+    mail = [head(b"6", lever, "Hooli AI", "Your Hooli AI Application: Staff Platform Engineer", NOW)]
+    raw = b"To: me@example.com\r\n" + signed(dns, f"Hooli AI <{lever}>", "someone.else@example.org", mail[0]["subject"],
+                                            "For the Staff Platform Engineer (R1002) role, the position has been closed.")
+    fake_mailbox(monkeypatch, mail, {b"6": raw})
+    assert inbox.check(days=2)["updates"] == []

@@ -154,8 +154,9 @@ def running_pid() -> int | None:
         pid = int(PIDFILE.read_text().strip())
     except (OSError, ValueError):
         return None
+    from backend.core.processes import probe
     try:
-        os.kill(pid, 0)
+        probe(pid)
     except OSError:
         return None
     try:

@@ -31,6 +31,7 @@ from backend.config.loader import PROJECT_ROOT, load_config
 from data_engineering.db.models import Job, STATUS_VALUES
 from data_engineering.db.session import get_session, init_engine
 from backend.core.jobage import age_days, age_label
+from backend.core.processes import probe
 from backend.core.jobfields import (JOB_TYPE_SHORT, JOB_TYPES, UNSTATED, experience_label, salary_label,
                                     workplace_label)
 
@@ -2074,7 +2075,7 @@ def task_pid(task: str) -> int | None:
     except (OSError, ValueError, IndexError):
         return None
     try:
-        os.kill(pid, 0)          # signal 0 just asks "are you there?"
+        probe(pid)               # "are you there?" -- os.kill(pid, 0) would end it on Windows
     except OSError:
         return None
 
@@ -2086,6 +2087,9 @@ def task_pid(task: str) -> int | None:
     # your resume" for a process that had been dead all day.
     #
     # Reap it if it is ours to reap, and either way report it as finished.
+    # Windows has no zombies (probe already said whether it exited) and no os.WNOHANG.
+    if os.name == "nt":
+        return pid
     try:
         reaped, _ = os.waitpid(pid, os.WNOHANG)
         if reaped == pid:
@@ -2156,6 +2160,10 @@ def start_task(task: str, args: list[str]):
     # "Run `export` ..." and matched nothing either. A process's exit code is
     # the answer and everything else is a guess, so write it to a file that
     # outlives the process -- this app cannot wait() on a detached child.
+    if os.name == "nt":
+        process = _start_task_windows(args, exit_path, handle)
+        task_pid_file(task).write_text(f"{process.pid}\n{time.time()}")
+        return jsonify(ok=True, started=True)
     command = " ".join(shlex.quote(part) for part in
                        [sys.executable, "-u", "main.py", *args])
     process = subprocess.Popen(
@@ -2167,6 +2175,23 @@ def start_task(task: str, args: list[str]):
     )
     task_pid_file(task).write_text(f"{process.pid}\n{time.time()}")
     return jsonify(ok=True, started=True)
+
+
+def _start_task_windows(args: list[str], exit_path: Path, handle) -> subprocess.Popen:
+    """start_task on Windows, which has no /bin/sh: Python writes the exit code down instead."""
+    wrapper = ("import subprocess, sys; code = subprocess.call(sys.argv[2:]); "
+               "open(sys.argv[1], 'w').write(f'{code}\\n')")
+    command = [sys.executable, "-X", "utf8", "-c", wrapper, str(exit_path),
+               sys.executable, "-X", "utf8", "-u", "main.py", *args]
+    # Its own process group, and out of the app's job object (devops/windows/run_webapp.py) where
+    # that allows it, so restarting this app does not kill half an hour of scraping.
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    try:
+        return subprocess.Popen(command, cwd=PROJECT_ROOT, stdout=handle, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB)
+    except PermissionError:          # a job that does not allow breakaway
+        return subprocess.Popen(command, cwd=PROJECT_ROOT, stdout=handle, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, creationflags=flags)
 
 
 @app.get("/run/probe/status")
@@ -2190,7 +2215,7 @@ def probe_status():
     alive = False
     if pid:
         try:
-            os.kill(int(pid), 0)
+            probe(int(pid))
             alive = not _is_zombie(int(pid))
         except (OSError, TypeError, ValueError):
             alive = False
@@ -2235,7 +2260,7 @@ def careers_status():
     alive = False
     if pid:
         try:
-            os.kill(int(pid), 0)
+            probe(int(pid))
             alive = not _is_zombie(int(pid))
         except (OSError, TypeError, ValueError):
             alive = False

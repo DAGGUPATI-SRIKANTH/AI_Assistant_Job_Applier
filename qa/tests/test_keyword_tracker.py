@@ -10,7 +10,7 @@ from ml.tailoring import keywords, pipeline
 
 @pytest.fixture
 def posting(monkeypatch):
-    monkeypatch.setattr(keywords, "weights", lambda jd, company=None: {
+    monkeypatch.setattr(keywords, "weights", lambda jd, company=None, fields=None: {
         "terraform": 3.0, "kafka": 2.0, "kubernetes": 2.0, "dynatrace": 1.0})
 
 

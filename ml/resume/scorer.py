@@ -73,6 +73,124 @@ PHRASES = (
 )
 
 
+def fold(term: str) -> str:
+    """A plural read as its singular, for matching only: "certifications" covers
+    "certification", "patients" covers "patient". Words that only end like a
+    plural are left alone ("process", "status", "analysis", "aws"). Both sides
+    are folded the same way, so "kubernetes" still meets "kubernetes"."""
+    if len(term) > 4 and term.endswith("ies"):
+        return term[:-3] + "y"
+    if len(term) > 4 and term.endswith(("sses", "shes", "ches", "xes", "zes")):
+        return term[:-2]
+    if len(term) > 3 and term.endswith("s") and not term.endswith(("ss", "us", "is")):
+        return term[:-1]
+    return term
+
+
+# The same thing for every other field: the licenses, tools and core words a
+# screener there looks for, so a nurse's "BLS" counts as much as an engineer's
+# "AWS". Without these only tech skills were weighted, and a registered nurse
+# scored at most 30% against registered nurse postings: job-ad prose outweighed
+# everything the resume did match.
+#
+# Read off 2,720 postings from 307 employers of every kind (October 2026):
+# words common in one kind of employer's postings, rare in the others', and
+# used by five or more employers there. Then read through by hand, keeping
+# skills, licenses, tools and the field's own nouns, dropping the prose; each
+# word is in three or more of those postings. Stored singular (see `fold`).
+# Weighted only in a posting of that field (FIELD_EVIDENCE).
+_FIELD_WORDS = {
+    "healthcare": (
+        "patient", "nursing", "nurse", "clinical", "clinician", "physician", "bls", "acls", "cpr",
+        "rn", "lpn", "lvn", "bsn", "cna", "emr", "ehr", "athena", "hipaa", "medicaid", "medicare",
+        "licensure", "medication", "infection", "outpatient", "inpatient", "acute",
+        "rehabilitation", "therapy", "therapist", "pharmacy", "pharmacist", "diagnosis",
+        "diagnostic", "pediatric", "telemetry", "triage", "charting", "icu", "surgical", "wound",
+        "dialysis", "oncology", "hospice", "dental", "hygienist", "radiology", "imaging",
+        "respiratory", "occupational", "dea", "aprn", "pmhnp", "np", "icd-10", "cpt", "payer",
+        "cms", "caregiver", "caregiving",
+    ),
+    "education": (
+        "classroom", "instruction", "instructional", "student", "teaching", "teacher",
+        "curriculum", "lesson", "academic", "faculty", "syllabus", "pedagogy", "k-12", "childhood",
+        "literacy", "tutoring", "advising", "enrollment", "admissions", "accreditation",
+        "paraprofessional", "preschool",
+    ),
+    "business": (
+        "cpa", "gaap", "ledger", "reconciliation", "accounting", "accountant", "audit", "auditing",
+        "tax", "payroll", "accrual", "underwriting", "lending", "loan", "mortgage", "banking",
+        "bank", "deposit", "teller", "bsa", "aml", "kyc", "fraud", "collections", "quickbooks",
+        "netsuite", "budgeting", "forecasting", "variance", "cma", "cfa", "paralegal", "attorney",
+        "litigation", "legal", "drafting", "notary", "bookkeeping", "invoicing", "billing",
+    ),
+    "hospitality": (
+        "restaurant", "culinary", "haccp", "servsafe", "sanitation", "food", "beverage", "menu",
+        "kitchen", "cook", "guest", "hospitality", "hotel", "housekeeping", "retail",
+        "merchandising", "merchandise", "pos", "inventory", "stocking", "store", "grocery",
+        "barista", "fitness", "membership", "gmp",
+    ),
+    "trades": (
+        "construction", "subcontractor", "superintendent", "foreman", "submittal", "rfi",
+        "procore", "bluebeam", "estimating", "estimator", "takeoff", "bid", "osha", "hvac",
+        "plumbing", "electrician", "welding", "piping", "blueprint", "drawing", "autocad", "revit",
+        "bim", "mep", "commissioning", "inspection", "concrete", "excavation", "civil",
+        "structural", "forklift", "warehouse", "logistics", "shipping", "receiving", "freight",
+        "pallet", "cdl", "wms", "manufacturing", "plc", "maintenance",
+    ),
+    "social": (
+        "counseling", "therapeutic", "behavioral", "crisis", "intervention", "lcsw", "lpc",
+        "housing", "youth", "disabilities", "developmental", "aba", "rbt", "caseload",
+        "psychology", "psychiatric", "trauma-informed", "medicaid",
+    ),
+}
+FIELDS = {name: frozenset(fold(w) for w in words) for name, words in _FIELD_WORDS.items()}
+FIELD_TERMS = frozenset().union(*FIELDS.values())
+# A posting is in a field when it uses this many different words of it: a nursing posting
+# names patients, BLS, the EMR and more, where a hotel-booking engineering job says "hotels"
+# once -- and a word a screener there would never look for must not be weighted as a skill.
+FIELD_EVIDENCE = 3
+
+# Whose field it is: the role families a person's search was made from
+# (ml/resume/profile.ROLE_FAMILIES). A DevOps engineer applying to a bank or a
+# hospital is not screened for "fraud" or "patient", however often the posting
+# says them, so only a person's own fields are weighted when they are known.
+# Tech families have no entry: SKILL_TERMS is theirs.
+FIELD_FAMILIES = {
+    "healthcare": ("healthcare", "allied_health"),
+    "education": ("education", "student_services", "library", "athletics"),
+    "business": ("accounting", "finance", "hr", "admin_ops", "legal_compliance"),
+    "hospitality": ("food_service",),
+    "trades": ("trades", "facilities", "manufacturing", "supply_chain", "civil_eng",
+               "mechanical_eng", "electrical_eng", "skilled_technician"),
+    "social": ("social_services", "public_safety"),
+}
+
+
+def fields_of(families) -> frozenset[str] | None:
+    """The fields whose words count for a person in these role families; None when
+    the families are not known, and then a posting's own words decide."""
+    if families is None:
+        return None
+    families = set(families)
+    return frozenset(name for name, members in FIELD_FAMILIES.items() if families & set(members))
+
+
+class Terms(frozenset):
+    """The words and phrases in a text. `term in terms` also finds a plural's
+    singular, so "certification" is in a resume that says "certifications"."""
+
+    def __contains__(self, term) -> bool:
+        return frozenset.__contains__(self, term) or frozenset.__contains__(self, fold(term))
+
+
+def present(text: str) -> Terms:
+    """Every scored word and phrase in `text`, each also as its singular: what a
+    posting's keywords are looked for in, by the score and by the keyword list on
+    the Tailor page alike (ml/tailoring/keywords.py)."""
+    terms = content_terms(text)
+    return Terms(set(terms) | {fold(t) for t in terms} | _phrases_present(text))
+
+
 @dataclass
 class ScoreResult:
     score: float                       # 0.0 – 1.0
@@ -147,6 +265,7 @@ def jd_keyword_weights(
     requirements: str | None = None,
     company: str | None = None,
     top_n: int = 40,
+    fields=None,
 ) -> dict[str, float]:
     """The JD's salient terms, weighted by frequency (sublinear).
 
@@ -161,21 +280,46 @@ def jd_keyword_weights(
     general_source = requirements if requirements and len(requirements) > 200 else jd_text
     company_tokens = set(tokenize(company or ""))
 
+    # Counted with plurals folded ("patient" and "patients" are one word), and
+    # shown as the posting writes it most often.
     counts: dict[str, int] = {}
+    forms: dict[str, dict[str, int]] = {}
     for term in content_terms(general_source):
         # 2-char tokens are almost all fragments ("re", "ll") — noise.
         if len(term) < 3 or term in company_tokens:
             continue
-        counts[term] = counts.get(term, 0) + 1
+        key = fold(term)
+        counts[key] = counts.get(key, 0) + 1
+        forms.setdefault(key, {})
+        forms[key][term] = forms[key].get(term, 0) + 1
 
-    weighted = {term: 1 + math.log(count) for term, count in counts.items()}
+    def shown(key: str, default: str) -> str:
+        seen = forms.get(key)
+        return max(seen, key=lambda form: (seen[form], form)) if seen else default
 
-    # Skills are matched against the FULL JD (they're often listed outside the
-    # requirements block) and outweigh generic prose.
+    weighted = {shown(key, key): 1 + math.log(count) for key, count in counts.items()}
+
+    # Skills -- and, in a posting of that field, its licenses, tools and core
+    # words -- are matched against the FULL JD (they're often listed outside the
+    # requirements block) and outweigh generic prose. Each once, however many
+    # forms it has.
     jd_all = f"{jd_text}\n{requirements or ''}"
-    for term in set(content_terms(jd_all)):
-        if term in SKILL_TERMS and term not in company_tokens:
-            weighted[term] = weighted.get(term, 1.0) * 2.5
+    jd_terms = content_terms(jd_all)
+    folded = {fold(t) for t in jd_terms}
+    # Only the person's own fields when known (`fields_of`), and those only in a
+    # posting that is in the field.
+    candidates = FIELDS.values() if fields is None else [FIELDS[f] for f in fields if f in FIELDS]
+    field_words = frozenset().union(*(words for words in candidates
+                                      if len(words & folded) >= FIELD_EVIDENCE))
+    weighed: set[str] = set()
+    for term in jd_terms:
+        key = fold(term)
+        if key in weighed or term in company_tokens:
+            continue
+        if term in SKILL_TERMS or key in field_words:
+            weighed.add(key)
+            name = shown(key, term)
+            weighted[name] = weighted.get(name, 1.0) * 2.5
     for phrase in _phrases_present(jd_all):
         weighted[phrase] = weighted.get(phrase, 1.0) * 2.5
 
@@ -246,6 +390,7 @@ def score_resume(
     job_title: str | None = None,
     search_titles=(),
     held_titles=(),
+    fields=None,
 ) -> ScoreResult:
     """How well this posting fits, from both halves of the question.
 
@@ -255,12 +400,12 @@ def score_resume(
     an infrastructure-flavoured resume.
     """
     weights = jd_keyword_weights(
-        jd_text, requirements=requirements, company=company, top_n=top_n
+        jd_text, requirements=requirements, company=company, top_n=top_n, fields=fields
     )
     if not weights:
         return ScoreResult(score=0.0, jd_terms=0)
 
-    resume_terms = set(content_terms(resume_text)) | _phrases_present(resume_text)
+    resume_terms = present(resume_text)
 
     matched: list[str] = []
     missing: list[str] = []

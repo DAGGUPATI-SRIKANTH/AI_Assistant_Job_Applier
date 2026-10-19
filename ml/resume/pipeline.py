@@ -17,10 +17,22 @@ from data_engineering.db.session import get_session
 from backend.core.jobage import age_days
 from ml.resume import progress
 from ml.resume.parser import Resume, find_base_resume, parse_resume
-from ml.resume.scorer import score_basis, score_resume
+from ml.resume.scorer import fields_of, score_basis, score_resume
 from ml.resume.writer import output_filename, write_review_note, write_tailored_resume
 
 log = logging.getLogger(__name__)
+
+
+def _profile_families(cfg) -> list[str] | None:
+    """The role families the person's search was made from; None when there is no profile."""
+    try:
+        from ml.resume.profile import PROFILE_FILENAME, load_profile
+
+        profile = load_profile(
+            PROJECT_ROOT / cfg.get("filters.profile_path", PROFILE_FILENAME))
+        return list(profile.families or []) if profile else None
+    except Exception:
+        return None
 
 
 def _profile_titles(cfg) -> tuple[list[str], list[str]]:
@@ -346,6 +358,8 @@ def score_jobs(
         # they are what tells a data engineer's resume that a DevSecOps
         # posting is not their job however much vocabulary it shares.
         search_titles, held_titles = _profile_titles(cfg)
+        # Which fields' licenses and tools count for this person (ml/resume/scorer.FIELD_FAMILIES).
+        fields = fields_of(_profile_families(cfg))
 
         for job in jobs:
             result = score_resume(
@@ -359,6 +373,7 @@ def score_jobs(
                 job_title=job.title,
                 search_titles=search_titles,
                 held_titles=held_titles,
+                fields=fields,
             )
             job.ats_match_score = result.score
             # Record what the number was measured against, so nothing later

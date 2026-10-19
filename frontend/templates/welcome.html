@@ -127,7 +127,8 @@
         <div class="hint" id="w-find-say" aria-live="polite">
           {%- if s.morning.waiting %}Upload your resume first.
           {%- elif s.morning.running %}Finding jobs…
-          {%- elif s.jobs.open %}{{ '{:,}'.format(s.jobs.strong) }} strong matches so far.{% endif -%}
+          {%- elif s.jobs.open %}{{ '{:,}'.format(s.jobs.strong) }} strong matches (60% or more) so far
+          {%- if s.jobs.best %}; your best match is {{ s.jobs.best }}%{% endif %}.{% endif -%}
         </div>
       </div>
     </li>
@@ -218,7 +219,8 @@
     }
     const st = await ask('/welcome/state');
     if (st.ok && st.jobs.open) {
-      findSay.textContent = `Done: ${st.jobs.open.toLocaleString()} jobs found, ${st.jobs.strong.toLocaleString()} strong matches.`;
+      findSay.textContent = `Done: ${st.jobs.open.toLocaleString()} jobs found, ${st.jobs.strong.toLocaleString()} strong matches`
+        + (st.jobs.best ? `; your best match is ${st.jobs.best}%.` : '.');
       $('w-jobs').hidden = false;
       $('w-find').classList.add('done');
     } else if (st.ok) {

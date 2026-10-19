@@ -93,3 +93,81 @@ def test_the_cap_sits_below_the_default_threshold():
     from ml.resume.scorer import TITLE_ONLY_CEILING
 
     assert TITLE_ONLY_CEILING < 0.60
+
+
+# --- every field, not only tech ---------------------------------------------
+# Only tech skills were weighted, so in a nursing posting job-ad prose outweighed
+# everything a nurse's resume matched: a registered nurse scored at most 30%
+# against registered nurse postings. Each field's licenses, tools and core words
+# now weigh what a tech skill weighs -- for people in that field.
+
+NURSING_JD = ("We are hiring a Registered Nurse (RN) for our telemetry unit. BLS and ACLS "
+              "certification required. You will assess patients, give medications and chart "
+              "in the EMR. Strong communicator who maintains standards and supports others. ") * 4
+NURSE_RESUME = ("Registered Nurse, 9 years on a telemetry unit. Certifications: BLS, ACLS. "
+                "Assess patients, administer medication, chart in Epic EMR.")
+
+
+def test_plurals_match_both_ways():
+    from ml.resume.scorer import fold, present
+    have = present("Certifications: BLS. Cared for patients.")
+    assert "certification" in have and "patient" in have and "patients" in have
+    assert fold("therapies") == "therapy" and fold("boxes") == "box"
+    for word in ("process", "status", "analysis", "aws", "bls"):     # only look plural
+        assert fold(word) == word
+
+
+def test_each_word_is_weighed_once_whatever_its_forms():
+    import math
+
+    from ml.resume.scorer import jd_keyword_weights
+    weights = jd_keyword_weights("Patient care. Our patients come first. Patients and patient safety.",
+                                 fields={"healthcare"})
+    forms = [term for term in weights if term.startswith("patient")]
+    assert len(forms) == 1                      # one entry, shown as the posting writes it most
+    assert weights[forms[0]] == pytest.approx(1 + math.log(4))     # fewer than 3 field words: no field
+
+
+def test_a_fields_licenses_weigh_what_a_tech_skill_weighs():
+    from ml.resume.scorer import jd_keyword_weights
+    nursing = jd_keyword_weights(NURSING_JD, fields={"healthcare"})
+    tech = jd_keyword_weights("We need AWS and Terraform. Strong communicator. " * 4)
+    assert nursing["bls"] == pytest.approx(tech["aws"])
+    assert {"rn", "acls", "emr", "telemetry"} <= set(nursing)
+    tops = list(nursing)[:8]
+    assert "communicator" not in tops and "maintains" not in tops
+
+
+def test_a_resume_with_the_fields_licenses_scores_higher_once_they_count():
+    as_nurse = score_resume(NURSE_RESUME, NURSING_JD, job_title="Registered Nurse",
+                            search_titles=["registered nurse"], fields={"healthcare"})
+    unweighted = score_resume(NURSE_RESUME, NURSING_JD, job_title="Registered Nurse",
+                              search_titles=["registered nurse"], fields=frozenset())
+    assert as_nurse.score > unweighted.score
+    assert {"bls", "acls", "emr", "telemetry", "patients"} <= set(as_nurse.matched)
+
+
+def test_a_field_counts_for_its_own_people_only():
+    """A DevOps engineer applying to a bank is not screened for "fraud" or "deposit"."""
+    from ml.resume.scorer import fields_of, jd_keyword_weights
+    bank = ("DevOps engineer for our bank: Kubernetes, Terraform, AWS. You will support audit, "
+            "fraud and banking compliance, loan and deposit systems. ") * 3
+    as_devops = jd_keyword_weights(bank, fields=fields_of(["devops", "cloud"]))
+    unknown = jd_keyword_weights(bank)                      # no profile: the posting decides
+    assert as_devops["kubernetes"] > as_devops["audit"]
+    assert unknown["audit"] == pytest.approx(as_devops["audit"] * 2.5)
+    assert fields_of(["devops", "cloud"]) == frozenset() and fields_of(None) is None
+    assert fields_of(["healthcare", "devops"]) == {"healthcare"}
+
+
+def test_one_mention_does_not_make_a_posting_part_of_a_field():
+    from ml.resume.scorer import jd_keyword_weights
+    travel = ("Our platform books hotels for travelers. We need a DevOps engineer with Kubernetes, "
+              "Terraform and AWS to keep the booking systems up. Hotels depend on us. ") * 3
+    weights = jd_keyword_weights(travel)
+    assert weights["kubernetes"] > weights["hotels"]
+
+
+def test_the_keyword_list_and_the_score_agree_on_plurals():
+    from ml.tailoring.keywords import _has
+    assert "certification" in _has("Certifications: BLS, ACLS")

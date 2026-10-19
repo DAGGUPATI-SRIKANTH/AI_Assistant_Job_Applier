@@ -29,6 +29,7 @@ def state() -> dict:
     from backend.config.envfile import read_env
     from data_engineering.db.models import Job
     from data_engineering.db.session import get_session
+    from sqlalchemy import func
     from ml.resume.llm import PROVIDERS
     from ml.resume.profile import load_profile
 
@@ -42,8 +43,10 @@ def state() -> dict:
             jobs = session.query(Job).filter(Job.is_open.is_(True)).count()
             strong = session.query(Job).filter(Job.is_open.is_(True),
                                                Job.ats_match_score >= threshold).count()
+            best = session.query(func.max(Job.ats_match_score)).filter(Job.is_open.is_(True)).scalar()
     except Exception:
         jobs = strong = 0
+        best = None
     last = morning_pages.last_run()
     return {
         "resume": resume,
@@ -58,7 +61,9 @@ def state() -> dict:
         "details": webapp.applicant_state(),
         "writer": {"chosen": bool(provider),
                    "label": PROVIDERS.get(provider, {}).get("label", "") if provider else ""},
-        "jobs": {"open": jobs, "strong": strong},
+        # The best score as well as the count over the line: a one-page resume covers less of a
+        # posting than a long one, and "0 strong matches" read as nothing found.
+        "jobs": {"open": jobs, "strong": strong, "best": round(best * 100) if best else None},
         "morning": {"running": bool(morning_pages.pipeline_pids()), "auto": not morning_pages.AUTO_OFF.exists(),
                     "last": last, "waiting": morning_pages.not_ready()},
         "folder": str(PROJECT_ROOT),

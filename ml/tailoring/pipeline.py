@@ -441,7 +441,7 @@ def keywords_for(folder: Path) -> dict:
         return {"keywords": [], "counts": {}, "coverage": None,
                 "note": "This run did not keep a copy of the resume it started from, so lost "
                         "keywords cannot be found. Tailor again from this page to see them."}
-    return keywords.track(master, tailored, jd, company)
+    return keywords.track(master, tailored, jd, company, keywords.person_fields())
 
 
 def check_keyword_edits(folder: Path, edits: dict[str, str]) -> dict:
@@ -449,7 +449,7 @@ def check_keyword_edits(folder: Path, edits: dict[str, str]) -> dict:
     jd, company = run_posting(folder)
     if not jd:
         return {"lost": [], "gained": [], "by_line": {}}
-    return keywords.check_edits(_texts(folder)[1], edits, jd, company)
+    return keywords.check_edits(_texts(folder)[1], edits, jd, company, keywords.person_fields())
 
 
 def _rescore(folder: Path, data: dict) -> None:

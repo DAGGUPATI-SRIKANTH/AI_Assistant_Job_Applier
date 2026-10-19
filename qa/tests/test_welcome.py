@@ -86,3 +86,20 @@ def test_terms_are_tidied_and_bounded():
     assert welcome_pages._terms("a\n a \nA\n\n b  c ") == ["a", "b c"]
     assert len(welcome_pages._terms("\n".join(f"t{i}" for i in range(500)))) == welcome_pages.MAX_TERMS
     assert welcome_pages._terms(["x" * 500]) == ["x" * welcome_pages.MAX_TERM_LEN]
+
+
+def test_the_best_match_is_said_even_when_none_is_strong(fresh):
+    """A one-page resume covers less of a posting than a long one: "0 strong matches" alone read
+    as if nothing had been found."""
+    from data_engineering.db.models import Job
+    from data_engineering.db.session import get_session
+    root, client = fresh
+    with_resume(root)
+    with get_session() as s:
+        for i, score in enumerate((0.31, 0.47)):
+            s.add(Job(source="lever", company="Mercy", company_slug="mercy", external_id=str(i), content_hash=str(i),
+                      title="Registered Nurse", description="Patient care.", application_url="https://x",
+                      is_open=True, ats_match_score=score))
+    page = client.get("/welcome").get_data(as_text=True)
+    assert "0 strong matches (60% or more) so far; your best match is 47%." in page
+    assert client.get("/welcome/state").get_json()["jobs"] == {"open": 2, "strong": 0, "best": 47}

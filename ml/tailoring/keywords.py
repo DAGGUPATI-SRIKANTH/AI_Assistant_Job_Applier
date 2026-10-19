@@ -17,9 +17,10 @@ import re
 SHOWN, LOST, MISSING = "shown", "lost", "missing"
 
 
-def _has(text: str) -> set[str]:
-    from ml.resume.scorer import _phrases_present, content_terms
-    return set(content_terms(text)) | _phrases_present(text)
+def _has(text: str) -> frozenset[str]:
+    """The text's words and phrases; `term in` it also finds a plural's singular, as the score does."""
+    from ml.resume.scorer import present
+    return present(text)
 
 
 def _lines(text: str) -> list[str]:
@@ -30,20 +31,34 @@ def _mentions(term: str, jd_text: str) -> int:
     return len(re.findall(rf"(?<![a-z0-9]){re.escape(term)}", (jd_text or "").lower()))
 
 
-def weights(jd_text: str, company: str | None = None) -> dict[str, float]:
+def person_fields():
+    """The fields whose licenses and tools count for the person this copy belongs to, from
+    their search profile -- as the score uses them; None when there is no profile."""
+    from backend.config.loader import PROJECT_ROOT
+    from ml.resume.profile import PROFILE_FILENAME, load_profile
+    from ml.resume.scorer import fields_of
+    try:
+        profile = load_profile(PROJECT_ROOT / PROFILE_FILENAME)
+    except Exception:
+        return None
+    return fields_of(profile.families) if profile else None
+
+
+def weights(jd_text: str, company: str | None = None, fields=None) -> dict[str, float]:
     """The posting's scored terms and their weights, without the ones no ATS counts."""
     from ml.resume.ats import _noise, requirements_only
     from ml.resume.scorer import jd_keyword_weights
     jd = requirements_only(jd_text)
-    return {t: w for t, w in jd_keyword_weights(jd, company=company, top_n=40).items()
+    return {t: w for t, w in jd_keyword_weights(jd, company=company, top_n=40, fields=fields).items()
             if not _noise(t, jd, company)}
 
 
-def track(master_text: str, tailored_text: str, jd_text: str, company: str | None = None) -> dict:
+def track(master_text: str, tailored_text: str, jd_text: str, company: str | None = None,
+          fields=None) -> dict:
     """Every scored keyword: shown (and where), lost in tailoring (and the master's
     lines that had it), or missing from the person's resume altogether."""
     from ml.resume.emphasis import GENERIC, _named
-    terms = weights(jd_text, company)
+    terms = weights(jd_text, company, fields)
     master_has, tailored_has = _has(master_text), _has(tailored_text)
     tailored_lines, master_lines = _lines(tailored_text), _lines(master_text)
     rows = []
@@ -70,7 +85,7 @@ def track(master_text: str, tailored_text: str, jd_text: str, company: str | Non
 
 
 def check_edits(tailored_text: str, edits: dict[str, str], jd_text: str,
-                company: str | None = None) -> dict:
+                company: str | None = None, fields=None) -> dict:
     """What these edits would do to the keywords, before they are saved.
 
     `edits` maps a line's current text to its new text ("" removes it). A
@@ -78,7 +93,7 @@ def check_edits(tailored_text: str, edits: dict[str, str], jd_text: str,
     a keyword that is still on another line is not lost, however many times
     it is edited out.
     """
-    terms = weights(jd_text, company)
+    terms = weights(jd_text, company, fields)
     # An edited line may not match a whole extracted line (a wrapped bullet):
     # apply the edit inside the text too.
     text_after = tailored_text

@@ -5,6 +5,7 @@ import signal
 import subprocess
 import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -93,10 +94,18 @@ def test_only_this_copys_script_is_the_run(tmp_path, monkeypatch):
         (folder / "daily_pipeline.sh").write_text("sleep 30\n")
     script = here / "daily_pipeline.sh"
     monkeypatch.setattr(webapp, "PIPELINE_SCRIPT", script)
-    procs = [subprocess.Popen(["/bin/bash", str(script), "daily"]),                     # the run
-             subprocess.Popen(["/bin/bash", str(other / "daily_pipeline.sh"), "daily"]),  # another copy
-             subprocess.Popen(["/bin/sh", "-c", f'sleep 30; : "{script} daily"']),      # mentions it
-             subprocess.Popen(["/bin/bash", str(script), "discover"])]                  # another task
+    bash, env = "/bin/bash", None
+    if os.name == "nt":
+        # Git for Windows' usr\bin\bash.exe itself: bin\bash.exe would add a second, child bash.exe.
+        # Its PATH is what bin\bash.exe would have set: usr\bin, for sleep.
+        if not morning_pages.BASH:
+            pytest.skip("no Git for Windows bash")
+        usr_bin = Path(morning_pages.BASH).parents[1] / "usr" / "bin"
+        bash, env = str(usr_bin / "bash.exe"), {**os.environ, "PATH": f"{usr_bin}{os.pathsep}{os.environ['PATH']}"}
+    procs = [subprocess.Popen([bash, str(script), "daily"], env=env),                   # the run
+             subprocess.Popen([bash, str(other / "daily_pipeline.sh"), "daily"], env=env),  # another copy
+             subprocess.Popen([bash, "-c", f'sleep 30; : "{script} daily"'], env=env),    # mentions it
+             subprocess.Popen([bash, str(script), "discover"], env=env)]                # another task
     try:
         assert webapp.pipeline_pids("daily") == [procs[0].pid]
         assert webapp.pipeline_pids("discover") == [procs[3].pid]
@@ -148,7 +157,7 @@ def test_start_runs_the_script_by_hand_even_with_the_6am_start_off(controls, mon
     (data / "daily.lock").mkdir()                   # left by a run that was killed
     assert client.post("/run/morning/auto", json={"on": False}).get_json()["auto"] is False
     assert client.post("/run/morning/start").get_json() == {"ok": True, "started": True}
-    assert started["args"] == ["/bin/bash", str(morning_pages.SCRIPT), "daily"]
+    assert started["args"] == [morning_pages.BASH, str(morning_pages.SCRIPT), "daily"]
     assert started["env"]["MANUAL"] == "1" and started["start_new_session"] is True
     assert not (data / "daily.lock").exists()
 

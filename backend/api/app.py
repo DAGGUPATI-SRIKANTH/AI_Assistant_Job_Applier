@@ -2395,6 +2395,8 @@ def pipeline_pids(task: str = "daily") -> list[int] | None:
     daily"` also matched any shell whose command merely mentioned it -- on 19 Oct a loop waiting
     for the run to end was taken for the run, and Stop ended it with the run -- and it would
     match another copy of the app on the same Mac."""
+    if os.name == "nt":
+        return _pipeline_pids_windows(task)
     try:
         out = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True,
                              timeout=5).stdout
@@ -2406,6 +2408,29 @@ def pipeline_pids(task: str = "daily") -> list[int] | None:
         pid, _, args = line.strip().partition(" ")
         args = args.strip()
         if pid.isdigit() and args.endswith(tail) and args[:-len(tail)] in ("/bin/bash", "bash"):
+            found.append(int(pid))
+    return found
+
+
+def _pipeline_pids_windows(task: str) -> list[int] | None:
+    """pipeline_pids on Windows: no ps, so ask Windows for bash.exe's command lines. Git for
+    Windows' bash.exe starts usr\\bin\\bash.exe with the same arguments; both are the run, and
+    Stop's taskkill /T ends the pair either way."""
+    command = ("Get-CimInstance Win32_Process -Filter \"Name='bash.exe'\" | "
+               "ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.CommandLine }")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+                             capture_output=True, text=True, timeout=15,
+                             creationflags=subprocess.CREATE_NO_WINDOW).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    tail = " " + subprocess.list2cmdline([str(PIPELINE_SCRIPT), task])   # as Start quotes it
+    found = []
+    for line in out.splitlines():
+        pid, _, args = line.strip().partition(" ")
+        args = args.strip()
+        if pid.isdigit() and args.endswith(tail) and \
+                Path(args[:-len(tail)].strip('"')).name.lower() == "bash.exe":
             found.append(int(pid))
     return found
 

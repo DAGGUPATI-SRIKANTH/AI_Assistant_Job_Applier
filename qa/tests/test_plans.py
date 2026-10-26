@@ -1,5 +1,6 @@
 """Claude, ChatGPT and Gemini on the person's own plan: status, environment, dispatch."""
 
+import os
 import subprocess
 
 import pytest
@@ -13,10 +14,10 @@ class Done:
 
 
 def test_node_tools_are_found_from_a_background_service(monkeypatch):
-    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     env = plans._env()
-    assert "/opt/homebrew/bin" in env["PATH"].split(":") and "OPENAI_API_KEY" not in env
+    assert "/opt/homebrew/bin" in env["PATH"].split(os.pathsep) and "OPENAI_API_KEY" not in env
 
 
 @pytest.mark.parametrize("said,code,signed", [

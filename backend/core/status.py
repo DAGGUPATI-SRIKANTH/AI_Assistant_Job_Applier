@@ -17,6 +17,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from backend.core.processes import probe
+
 BAR_WIDTH = 34
 
 
@@ -41,7 +43,7 @@ def _alive(pid: int | None) -> bool:
     if not pid:
         return False
     try:
-        os.kill(pid, 0)
+        probe(pid)
     except (OSError, ProcessLookupError):
         return False
     return True

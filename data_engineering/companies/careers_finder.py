@@ -53,6 +53,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
+from backend.core.processes import probe
 from data_engineering.scraper.http_client import PoliteClient
 
 from . import db as cdb
@@ -1167,7 +1168,7 @@ def read_json(path: Path) -> dict:
 def running_pid() -> int | None:
     try:
         pid = int(PIDFILE.read_text().strip())
-        os.kill(pid, 0)
+        probe(pid)
     except (OSError, ValueError):
         return None
     try:

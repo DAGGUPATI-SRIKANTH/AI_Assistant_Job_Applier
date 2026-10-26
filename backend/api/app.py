@@ -31,6 +31,7 @@ from backend.config.loader import PROJECT_ROOT, load_config
 from data_engineering.db.models import Job, STATUS_VALUES
 from data_engineering.db.session import get_session, init_engine
 from backend.core.jobage import age_days, age_label
+from backend.core.processes import probe
 from backend.core.jobfields import (JOB_TYPE_SHORT, JOB_TYPES, UNSTATED, experience_label, salary_label,
                                     workplace_label)
 
@@ -2074,7 +2075,7 @@ def task_pid(task: str) -> int | None:
     except (OSError, ValueError, IndexError):
         return None
     try:
-        os.kill(pid, 0)          # signal 0 just asks "are you there?"
+        probe(pid)               # "are you there?" -- os.kill(pid, 0) would end it on Windows
     except OSError:
         return None
 
@@ -2086,6 +2087,9 @@ def task_pid(task: str) -> int | None:
     # your resume" for a process that had been dead all day.
     #
     # Reap it if it is ours to reap, and either way report it as finished.
+    # Windows has no zombies (probe already said whether it exited) and no os.WNOHANG.
+    if os.name == "nt":
+        return pid
     try:
         reaped, _ = os.waitpid(pid, os.WNOHANG)
         if reaped == pid:
@@ -2156,6 +2160,11 @@ def start_task(task: str, args: list[str]):
     # "Run `export` ..." and matched nothing either. A process's exit code is
     # the answer and everything else is a guess, so write it to a file that
     # outlives the process -- this app cannot wait() on a detached child.
+    if os.name == "nt":
+        handle.close()
+        process = _start_task_windows(args, exit_path, log_path)
+        task_pid_file(task).write_text(f"{process.pid}\n{time.time()}")
+        return jsonify(ok=True, started=True)
     command = " ".join(shlex.quote(part) for part in
                        [sys.executable, "-u", "main.py", *args])
     process = subprocess.Popen(
@@ -2167,6 +2176,30 @@ def start_task(task: str, args: list[str]):
     )
     task_pid_file(task).write_text(f"{process.pid}\n{time.time()}")
     return jsonify(ok=True, started=True)
+
+
+def _start_task_windows(args: list[str], exit_path: Path, log_path: Path) -> subprocess.Popen:
+    """start_task on Windows, which has no /bin/sh: Python writes the exit code down instead.
+
+    The wrapper hands the log to main.py itself: under pythonw.exe (devops/windows/) a child
+    started without explicit handles inherits no output, and the page read an empty log.
+    """
+    wrapper = ("import subprocess, sys\n"
+               "with open(sys.argv[2], 'ab') as log:\n"
+               "    code = subprocess.call(sys.argv[3:], stdout=log, stderr=subprocess.STDOUT,\n"
+               "                           stdin=subprocess.DEVNULL)\n"
+               "open(sys.argv[1], 'w').write(f'{code}\\n')\n")
+    command = [sys.executable, "-X", "utf8", "-c", wrapper, str(exit_path), str(log_path),
+               sys.executable, "-X", "utf8", "-u", "main.py", *args]
+    # Its own process group, and out of the app's job object (devops/windows/run_webapp.py) where
+    # that allows it, so restarting this app does not kill half an hour of scraping.
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    quiet = dict(cwd=PROJECT_ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                 stderr=subprocess.DEVNULL)
+    try:
+        return subprocess.Popen(command, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **quiet)
+    except PermissionError:          # a job that does not allow breakaway
+        return subprocess.Popen(command, creationflags=flags, **quiet)
 
 
 @app.get("/run/probe/status")
@@ -2190,7 +2223,7 @@ def probe_status():
     alive = False
     if pid:
         try:
-            os.kill(int(pid), 0)
+            probe(int(pid))
             alive = not _is_zombie(int(pid))
         except (OSError, TypeError, ValueError):
             alive = False
@@ -2235,7 +2268,7 @@ def careers_status():
     alive = False
     if pid:
         try:
-            os.kill(int(pid), 0)
+            probe(int(pid))
             alive = not _is_zombie(int(pid))
         except (OSError, TypeError, ValueError):
             alive = False
@@ -2362,6 +2395,8 @@ def pipeline_pids(task: str = "daily") -> list[int] | None:
     daily"` also matched any shell whose command merely mentioned it -- on 19 Oct a loop waiting
     for the run to end was taken for the run, and Stop ended it with the run -- and it would
     match another copy of the app on the same Mac."""
+    if os.name == "nt":
+        return _pipeline_pids_windows(task)
     try:
         out = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True,
                              timeout=5).stdout
@@ -2373,6 +2408,29 @@ def pipeline_pids(task: str = "daily") -> list[int] | None:
         pid, _, args = line.strip().partition(" ")
         args = args.strip()
         if pid.isdigit() and args.endswith(tail) and args[:-len(tail)] in ("/bin/bash", "bash"):
+            found.append(int(pid))
+    return found
+
+
+def _pipeline_pids_windows(task: str) -> list[int] | None:
+    """pipeline_pids on Windows: no ps, so ask Windows for bash.exe's command lines. Git for
+    Windows' bash.exe starts usr\\bin\\bash.exe with the same arguments; both are the run, and
+    Stop's taskkill /T ends the pair either way."""
+    command = ("Get-CimInstance Win32_Process -Filter \"Name='bash.exe'\" | "
+               "ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.CommandLine }")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+                             capture_output=True, text=True, timeout=15,
+                             creationflags=subprocess.CREATE_NO_WINDOW).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    tail = " " + subprocess.list2cmdline([str(PIPELINE_SCRIPT), task])   # as Start quotes it
+    found = []
+    for line in out.splitlines():
+        pid, _, args = line.strip().partition(" ")
+        args = args.strip()
+        if pid.isdigit() and args.endswith(tail) and \
+                Path(args[:-len(tail)].strip('"')).name.lower() == "bash.exe":
             found.append(int(pid))
     return found
 

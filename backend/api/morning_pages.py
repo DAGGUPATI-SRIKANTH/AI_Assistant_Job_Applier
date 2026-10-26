@@ -15,10 +15,12 @@ Jobs page:
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import time
 from datetime import datetime
+from pathlib import Path
 
 from flask import jsonify, request
 
@@ -31,6 +33,40 @@ PIDFILE = PROJECT_ROOT / "data" / "daily.pid"              # the script's own pi
 AUTO_OFF = PROJECT_ROOT / "data" / "daily_auto_off"      # read by daily_pipeline.sh
 OUT = PROJECT_ROOT / "data" / "launchd_daily.log"           # where launchd sends the script's own output
 PAGE_TASKS = ("scrape", "score")                            # page-started work Stop also ends
+
+
+def _git_bash() -> str | None:
+    """Git for Windows' bash, which runs the script there. Not `bash` from PATH: on Windows
+    that can be WSL's, a Linux with neither this venv nor these paths."""
+    git = shutil.which("git")
+    places = [Path(git).resolve().parents[1]] if git else []          # Git\cmd\git.exe -> Git
+    places += [Path(os.environ[v]) / "Git" for v in ("ProgramFiles", "ProgramW6432") if os.environ.get(v)]
+    if os.environ.get("LOCALAPPDATA"):
+        places.append(Path(os.environ["LOCALAPPDATA"]) / "Programs" / "Git")
+    return next((str(p / "bin" / "bash.exe") for p in places if (p / "bin" / "bash.exe").exists()), None)
+
+
+BASH = _git_bash() if os.name == "nt" else "/bin/bash"
+
+
+def _start_script(out, **env: str) -> None:
+    """Start daily_pipeline.sh daily in the background, writing to `out`."""
+    env = {**os.environ, **env}
+    kwargs = dict(cwd=PROJECT_ROOT, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                  # Its own session: restarting this app must not end the run.
+                  start_new_session=True)
+    if os.name == "nt":
+        # The script's defaults are the Mac's; PYTHONUTF8 as in docs/WINDOWS_SETUP.md, step 3.
+        env.update(PIPELINE_PROJECT=PROJECT_ROOT.as_posix(), PYTHONUTF8="1")
+        # No console window, and out of the app's job object (devops/windows/) where it allows that.
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        try:
+            subprocess.Popen([BASH, str(SCRIPT), "daily"], env=env,
+                             creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **kwargs)
+            return
+        except PermissionError:            # a job that does not allow breakaway
+            kwargs["creationflags"] = flags
+    subprocess.Popen([BASH, str(SCRIPT), "daily"], env=env, **kwargs)
 
 
 def pipeline_pids() -> list[int]:
@@ -91,13 +127,11 @@ def missed_morning(now: datetime | None = None) -> bool:
 
 def catch_up() -> bool:
     """Start the morning run the Mac missed, as the schedule would have. Returns whether it did."""
-    if not missed_morning():
+    if not BASH or not missed_morning():
         return False
     OUT.parent.mkdir(parents=True, exist_ok=True)
     with OUT.open("a") as out:
-        subprocess.Popen(["/bin/bash", str(SCRIPT), "daily"], cwd=PROJECT_ROOT, stdout=out,
-                         stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
-                         env={**os.environ, "CATCH_UP": "1"})
+        _start_script(out, CATCH_UP="1")
     return True
 
 
@@ -139,13 +173,14 @@ def morning_start():
     waiting = not_ready()
     if waiting:
         return jsonify(ok=False, error=f"Not yet: {waiting}."), 409
+    if not BASH:
+        return jsonify(ok=False, error="The morning run is a bash script, and Windows runs it with "
+                                       "Git for Windows' bash, which was not found. Install Git for "
+                                       "Windows from git-scm.com, then restart this app."), 409
     _clear_lock()                          # left by a run that was killed; nothing holds it
     OUT.parent.mkdir(parents=True, exist_ok=True)
     with OUT.open("a") as out:
-        subprocess.Popen(["/bin/bash", str(SCRIPT), "daily"], cwd=PROJECT_ROOT, stdout=out,
-                         stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                         # Its own session: restarting this app must not end the run.
-                         start_new_session=True, env={**os.environ, "MANUAL": "1"})
+        _start_script(out, MANUAL="1")
     return jsonify(ok=True, started=True)
 
 
@@ -165,15 +200,34 @@ def _alive(group: int) -> bool:
     return True
 
 
+def _end_tree(pid: int) -> None:
+    """Windows has no process groups: taskkill /T ends the process and every child it started."""
+    try:
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 @app.post("/run/morning/stop")
 def morning_stop():
     """End the morning run (and a fetch or re-score started from the page): the script and
     everything it started, which share its process group. What it fetched so far is kept --
     every board is saved as it is read."""
-    own = os.getpgid(0)
     morning = bool(pipeline_pids()) or LOCK.is_dir()
+    pids = pipeline_pids() + [p for p in (task_pid(t) for t in PAGE_TASKS) if p]
+    if os.name == "nt":
+        pids = [p for p in pids if p != os.getpid()]
+        if not pids and not LOCK.is_dir():
+            return jsonify(ok=True, stopped=False, note="Nothing was running.")
+        for pid in pids:
+            _end_tree(pid)
+        _clear_lock()
+        if morning:
+            _say("=== daily stopped from the Jobs page ===")
+        return jsonify(ok=True, stopped=True)
+    own = os.getpgid(0)
     groups: set[int] = set()
-    for pid in pipeline_pids() + [p for p in (task_pid(t) for t in PAGE_TASKS) if p]:
+    for pid in pids:
         try:
             group = os.getpgid(pid)
         except OSError:
